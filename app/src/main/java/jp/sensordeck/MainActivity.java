@@ -1,6 +1,8 @@
 package jp.sensordeck;
 
 import android.Manifest;
+import android.animation.Animator;
+import android.animation.AnimatorListenerAdapter;
 import android.animation.ValueAnimator;
 import android.app.Activity;
 import android.content.Context;
@@ -87,12 +89,12 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
         if (SensorManager.getRotationMatrix(r,null,accel,magnetic)) {
             SensorManager.getOrientation(r,o); dashboard.heading = (float)((Math.toDegrees(o[0])+360)%360);
         }
-        dashboard.invalidate();
+        dashboard.invalidateSensors();
     }
     @Override public void onAccuracyChanged(Sensor s,int a) {}
     @Override public void onLocationChanged(Location l) {
         dashboard.location=l;
-        dashboard.invalidate();
+        dashboard.invalidateSensors();
         fetchWeather(l);
     }
 
@@ -104,7 +106,7 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
         lastWeatherLocation = new Location(location);
         lastWeatherFetch = now;
         dashboard.weather = "現在地の予報を取得中…";
-        dashboard.invalidate();
+        dashboard.invalidateWeather();
         double lat = location.getLatitude(), lon = location.getLongitude();
         fetchPlaceAndWeatherNews(lat,lon);
         new Thread(() -> {
@@ -179,12 +181,12 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
                             .putFloat("min",(float)min.optDouble(0,Float.NaN))
                             .putLong("updated",System.currentTimeMillis()).apply();
                     WeatherWidgetProvider.updateAll(this);
-                    dashboard.invalidate();
+                    dashboard.invalidateWeather();
                 });
             } catch (Exception e) {
                 runOnUiThread(() -> {
                     dashboard.weather = "天気予報を取得できませんでした";
-                    dashboard.invalidate();
+                    dashboard.invalidateWeather();
                 });
             } finally {
                 if (connection != null) connection.disconnect();
@@ -214,7 +216,7 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
                 String url=slug==null?"https://weathernews.jp/":
                         "https://weathernews.jp/onebox/tenki/"+slug+"/"+municipality+"/";
                 runOnUiThread(() -> {
-                    dashboard.placeName=place;weatherNewsUrl=url;dashboard.invalidate();
+                    dashboard.placeName=place;weatherNewsUrl=url;dashboard.invalidateWeather();
                     getSharedPreferences("weather_widget",MODE_PRIVATE).edit()
                             .putString("place",place).apply();
                     WeatherWidgetProvider.updateAll(this);
@@ -270,28 +272,35 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
     static class Dashboard extends View {
         final Paint p = new Paint(3); final Map<Integer,float[]> values=new HashMap<>();
         final Map<Integer,Boolean> available=new HashMap<>(); final ArrayDeque<Float> history=new ArrayDeque<>();
+        final Rect drawClip=new Rect();
+        final Typeface normalTypeface=Typeface.create("sans",Typeface.NORMAL);
+        final Typeface boldTypeface=Typeface.create("sans",Typeface.BOLD);
         Location location; float heading; String weather="GPS測位後に予報を表示";
         String placeName="現在地を測位中";
         float currentTemp=Float.NaN,apparentTemp=Float.NaN,todayMax=Float.NaN,todayMin=Float.NaN;
         int currentCode; boolean isDay=true;
         String[] hourTimes; float[] hourTemps; int[] hourCodes,hourRain;
         final Runnable mapAction, weatherAction, fishingAction; int pressedCard,hourOffset;
-        float hourPosition,touchStartHourPosition;
-        boolean draggingHours;
+        float hourPosition,touchStartHourPosition,dragTargetPosition;
+        boolean draggingHours,dragFramePosted,pendingSensorRedraw;
+        Runnable dragFrame;
         ValueAnimator hourAnimator;
         float touchDownX,touchDownY;
         final int bg=Color.rgb(7,17,31), card=Color.rgb(16,31,48), mint=Color.rgb(0,212,170), white=Color.rgb(238,246,252), muted=Color.rgb(143,163,180);
         Dashboard(Context c,Runnable mapAction,Runnable weatherAction,Runnable fishingAction){
             super(c);this.mapAction=mapAction;this.weatherAction=weatherAction;
             this.fishingAction=fishingAction;
-            p.setTypeface(Typeface.create("sans",Typeface.NORMAL));
+            p.setTypeface(normalTypeface);dragFrame=this::smoothDragStep;
             setBackgroundColor(bg);setClickable(true);
             setContentDescription("GPS地図と現在地の天気予報");
         }
         void addPressure(float v){if(history.size()>=80)history.removeFirst();history.addLast(v);}
         String val(int t,int i,String unit){float[]v=values.get(t);return v==null?"計測中…":String.format(Locale.JAPAN,"%.2f %s",v[i],unit);}
-        @Override protected void onDraw(Canvas c){super.onDraw(c);float density=getResources().getDisplayMetrics().density;c.save();c.scale(density,density);float w=getWidth()/density, pad=24, y;
-            weatherHero(c,w);
+        @Override protected void onDraw(Canvas c){super.onDraw(c);float density=getResources().getDisplayMetrics().density;
+            c.getClipBounds(drawClip);boolean weatherOnly=drawClip.bottom<=(int)(550*density),sensorsOnly=drawClip.top>=(int)(530*density);
+            c.save();c.scale(density,density);float w=getWidth()/density, pad=24, y;
+            if(!sensorsOnly)weatherHero(c,w);
+            if(weatherOnly){c.restore();return;}
             y=570;text(c,"SENSOR DECK",pad,y,28,white,true);text(c,"Galaxy S25 • LIVE",pad,y+28,13,mint,false);y+=70;
             float pressure=values.containsKey(Sensor.TYPE_PRESSURE)?values.get(Sensor.TYPE_PRESSURE)[0]:Float.NaN;
             box(c,pad,y,w-pad,y+190);text(c,"気圧",pad+18,y+30,14,muted,false);
@@ -373,9 +382,9 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
                 pressedCard=card;touchDownX=event.getX();touchDownY=event.getY();
                 if(card==2){
                     if(hourAnimator!=null)hourAnimator.cancel();
-                    touchStartHourPosition=hourPosition;draggingHours=false;
+                    touchStartHourPosition=hourPosition;dragTargetPosition=hourPosition;draggingHours=false;
                 }
-                invalidate();return true;
+                if(card==2||card==4)invalidateWeather();else invalidate();return true;
             }
             if(event.getAction()==MotionEvent.ACTION_MOVE&&pressedCard==2&&hourTimes!=null){
                 float dx=event.getX()-touchDownX,dy=event.getY()-touchDownY;
@@ -383,15 +392,17 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
                     draggingHours=true;getParent().requestDisallowInterceptTouchEvent(true);
                     float columnPx=(getWidth()-68*density)/6f;
                     float max=Math.max(0,hourTimes.length-6);
-                    float hourDelta=Math.max(-1f,Math.min(1f,-dx/columnPx));
-                    hourPosition=Math.max(0,Math.min(max,touchStartHourPosition+hourDelta));
-                    invalidate();return true;
+                    float raw=-dx/columnPx,absolute=Math.abs(raw);
+                    float limited=absolute<=1f?raw:Math.signum(raw)*(1f+Math.min(.12f,(absolute-1f)*.12f));
+                    setDragTarget(Math.max(0,Math.min(max,touchStartHourPosition+limited)));
+                    return true;
                 }
             }
             if(event.getAction()==MotionEvent.ACTION_UP){
                 getParent().requestDisallowInterceptTouchEvent(false);
                 int activate=pressedCard==2&&draggingHours?2:(pressedCard==card?card:0);
-                pressedCard=0;invalidate();
+                int releasedCard=pressedCard;pressedCard=0;
+                if(releasedCard==2||releasedCard==4)invalidateWeather();else invalidate();
                 if(activate==1){super.performClick();mapAction.run();}
                 if(activate==2){
                     float dx=event.getX()-touchDownX;
@@ -407,8 +418,9 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
             }
             if(event.getAction()==MotionEvent.ACTION_CANCEL){
                 getParent().requestDisallowInterceptTouchEvent(false);
-                pressedCard=0;
-                if(draggingHours){draggingHours=false;animateToHour(hourOffset);}else invalidate();
+                int cancelledCard=pressedCard;pressedCard=0;
+                if(draggingHours){draggingHours=false;animateToHour(hourOffset);}
+                else if(cancelledCard==2||cancelledCard==4)invalidateWeather();else invalidate();
                 return true;
             }
             return true;
@@ -424,9 +436,42 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
             float distance=Math.min(1f,Math.abs(hourPosition-next));
             hourAnimator.setDuration((long)(170+220*distance));
             hourAnimator.setInterpolator(new PathInterpolator(.2f,0f,0f,1f));
-            hourAnimator.addUpdateListener(a->{hourPosition=(float)a.getAnimatedValue();invalidate();});
+            hourAnimator.addUpdateListener(a->{hourPosition=(float)a.getAnimatedValue();invalidateWeather();});
+            hourAnimator.addListener(new AnimatorListenerAdapter(){
+                @Override public void onAnimationEnd(Animator animation){
+                    if(hourAnimator==animation&&!draggingHours&&pendingSensorRedraw){
+                        pendingSensorRedraw=false;invalidateSensors();
+                    }
+                }
+            });
             hourAnimator.start();
             if(changed)performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK);
+        }
+        void setDragTarget(float target){
+            dragTargetPosition=target;
+            if(!dragFramePosted){dragFramePosted=true;postOnAnimation(dragFrame);}
+        }
+        void smoothDragStep(){
+            dragFramePosted=false;
+            if(!draggingHours)return;
+            float difference=dragTargetPosition-hourPosition;
+            if(Math.abs(difference)<.002f)hourPosition=dragTargetPosition;
+            else{
+                hourPosition+=difference*.52f;
+                dragFramePosted=true;postOnAnimation(dragFrame);
+            }
+            invalidateWeather();
+        }
+        void invalidateWeather(){
+            float density=getResources().getDisplayMetrics().density;
+            postInvalidateOnAnimation(0,0,getWidth(),(int)(542*density));
+        }
+        void invalidateSensors(){
+            if(pressedCard==2||draggingHours||(hourAnimator!=null&&hourAnimator.isRunning())){
+                pendingSensorRedraw=true;return;
+            }
+            float density=getResources().getDisplayMetrics().density;
+            postInvalidateOnAnimation(0,(int)(538*density),getWidth(),getHeight());
         }
         @Override public boolean performClick(){super.performClick();return true;}
         String vector(int t,String unit){float[]v=values.get(t);return v==null?"計測中…":String.format(Locale.JAPAN,"X %.1f\nY %.1f  Z %.1f %s",v[0],v[1],v[2],unit);}
@@ -435,7 +480,7 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
         void gpsBox(Canvas c,float l,float t,float r,float b){p.setColor(pressedCard==1?Color.rgb(24,61,78):card);c.drawRoundRect(l,t,r,b,22,22,p);}
         void weatherBox(Canvas c,float l,float t,float r,float b){p.setColor(pressedCard==2?Color.rgb(24,61,78):card);c.drawRoundRect(l,t,r,b,22,22,p);}
         void fishingBox(Canvas c,float l,float t,float r,float b){p.setColor(pressedCard==3?Color.rgb(24,61,78):card);c.drawRoundRect(l,t,r,b,22,22,p);}
-        void text(Canvas c,String s,float x,float y,float size,int color,boolean bold){p.setTextSize(size);p.setColor(color);p.setTypeface(Typeface.create("sans",bold?Typeface.BOLD:Typeface.NORMAL));c.drawText(s,x,y,p);}
+        void text(Canvas c,String s,float x,float y,float size,int color,boolean bold){p.setTextSize(size);p.setColor(color);p.setTypeface(bold?boldTypeface:normalTypeface);c.drawText(s,x,y,p);}
         void multi(Canvas c,String s,float x,float y,float size,int color){for(String line:s.split("\n")){text(c,line,x,y,size,color,false);y+=22;}}
         void graph(Canvas c,float l,float t,float r,float b){if(history.size()<2)return;float min=Float.MAX_VALUE,max=-Float.MAX_VALUE;for(float v:history){min=Math.min(min,v);max=Math.max(max,v);}if(max-min<.2f){max+=.1f;min-=.1f;}Path path=new Path();int i=0,n=history.size();for(float v:history){float x=l+(r-l)*i/(n-1),y=b-(v-min)/(max-min)*(b-t);if(i++==0)path.moveTo(x,y);else path.lineTo(x,y);}p.setStyle(Paint.Style.STROKE);p.setStrokeWidth(4);p.setColor(mint);c.drawPath(path,p);p.setStyle(Paint.Style.FILL);}
         String dir(float d){String[]a={"北","北東","東","南東","南","南西","西","北西"};return a[Math.round(d/45)%8];}
