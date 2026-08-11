@@ -44,7 +44,7 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
         content.setOrientation(LinearLayout.VERTICAL);
         content.setPadding(0, 0, 0, (int)(32 * density));
         content.addView(dashboard, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, (int)(1160 * density)));
+                ViewGroup.LayoutParams.MATCH_PARENT, (int)(1540 * density)));
         scroll.addView(content, new ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         setContentView(scroll);
@@ -106,7 +106,8 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
             try {
                 String endpoint = String.format(Locale.US,
                         "https://api.open-meteo.com/v1/forecast?latitude=%.5f&longitude=%.5f"
-                        + "&current=temperature_2m,weather_code"
+                        + "&current=temperature_2m,apparent_temperature,weather_code,is_day"
+                        + "&hourly=temperature_2m,weather_code,precipitation_probability"
                         + "&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max"
                         + "&timezone=auto&forecast_days=2", lat, lon);
                 connection = (HttpURLConnection)new URL(endpoint).openConnection();
@@ -121,10 +122,29 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
                 JSONObject root = new JSONObject(body.toString());
                 JSONObject current = root.getJSONObject("current");
                 JSONObject daily = root.getJSONObject("daily");
+                JSONObject hourly = root.getJSONObject("hourly");
                 JSONArray codes = daily.getJSONArray("weather_code");
                 JSONArray max = daily.getJSONArray("temperature_2m_max");
                 JSONArray min = daily.getJSONArray("temperature_2m_min");
                 JSONArray rain = daily.getJSONArray("precipitation_probability_max");
+                JSONArray times = hourly.getJSONArray("time");
+                JSONArray hourlyTemps = hourly.getJSONArray("temperature_2m");
+                JSONArray hourlyCodes = hourly.getJSONArray("weather_code");
+                JSONArray hourlyRain = hourly.getJSONArray("precipitation_probability");
+                String currentTime = current.getString("time");
+                int start = 0;
+                while (start < times.length()-1
+                        && times.getString(start).compareTo(currentTime) < 0) start++;
+                String[] nextTimes = new String[6];
+                float[] nextTemps = new float[6];
+                int[] nextCodes = new int[6], nextRain = new int[6];
+                for (int i=0;i<6;i++) {
+                    int index=Math.min(start+i,times.length()-1);
+                    nextTimes[i]=times.getString(index);
+                    nextTemps[i]=(float)hourlyTemps.getDouble(index);
+                    nextCodes[i]=hourlyCodes.getInt(index);
+                    nextRain[i]=hourlyRain.getInt(index);
+                }
                 String result = String.format(Locale.JAPAN,
                         "現在 %.1f℃  %s\n今日 %.0f〜%.0f℃  降水%d%%\n明日 %.0f〜%.0f℃  %s  降水%d%%",
                         current.getDouble("temperature_2m"),
@@ -132,7 +152,29 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
                         min.getDouble(0), max.getDouble(0), rain.getInt(0),
                         min.getDouble(1), max.getDouble(1),
                         weatherName(codes.getInt(1)), rain.getInt(1));
-                runOnUiThread(() -> { dashboard.weather = result; dashboard.invalidate(); });
+                String place = "現在地";
+                try {
+                    List<Address> addresses = new Geocoder(this, Locale.JAPAN)
+                            .getFromLocation(lat, lon, 1);
+                    if (addresses != null && !addresses.isEmpty()) {
+                        Address a=addresses.get(0);
+                        place=a.getSubLocality()!=null?a.getSubLocality():
+                                (a.getLocality()!=null?a.getLocality():"現在地");
+                    }
+                } catch (Exception ignored) {}
+                String finalPlace=place;
+                runOnUiThread(() -> {
+                    dashboard.weather=result;dashboard.placeName=finalPlace;
+                    dashboard.currentTemp=(float)current.optDouble("temperature_2m",Float.NaN);
+                    dashboard.apparentTemp=(float)current.optDouble("apparent_temperature",Float.NaN);
+                    dashboard.currentCode=current.optInt("weather_code",0);
+                    dashboard.isDay=current.optInt("is_day",1)==1;
+                    dashboard.todayMax=(float)max.optDouble(0,Float.NaN);
+                    dashboard.todayMin=(float)min.optDouble(0,Float.NaN);
+                    dashboard.hourTimes=nextTimes;dashboard.hourTemps=nextTemps;
+                    dashboard.hourCodes=nextCodes;dashboard.hourRain=nextRain;
+                    dashboard.invalidate();
+                });
             } catch (Exception e) {
                 runOnUiThread(() -> {
                     dashboard.weather = "天気予報を取得できませんでした";
@@ -185,6 +227,10 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
         final Paint p = new Paint(3); final Map<Integer,float[]> values=new HashMap<>();
         final Map<Integer,Boolean> available=new HashMap<>(); final ArrayDeque<Float> history=new ArrayDeque<>();
         Location location; float heading; String weather="GPS測位後に予報を表示";
+        String placeName="現在地を測位中";
+        float currentTemp=Float.NaN,apparentTemp=Float.NaN,todayMax=Float.NaN,todayMin=Float.NaN;
+        int currentCode; boolean isDay=true;
+        String[] hourTimes; float[] hourTemps; int[] hourCodes,hourRain;
         final Runnable mapAction, weatherAction; int pressedCard;
         final int bg=Color.rgb(7,17,31), card=Color.rgb(16,31,48), mint=Color.rgb(0,212,170), white=Color.rgb(238,246,252), muted=Color.rgb(143,163,180);
         Dashboard(Context c,Runnable mapAction,Runnable weatherAction){
@@ -195,8 +241,9 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
         }
         void addPressure(float v){if(history.size()>=80)history.removeFirst();history.addLast(v);}
         String val(int t,int i,String unit){float[]v=values.get(t);return v==null?"計測中…":String.format(Locale.JAPAN,"%.2f %s",v[i],unit);}
-        @Override protected void onDraw(Canvas c){super.onDraw(c);float density=getResources().getDisplayMetrics().density;c.save();c.scale(density,density);float w=getWidth()/density, pad=24, y=56;
-            text(c,"SENSOR DECK",pad,y,28,white,true); text(c,"Galaxy S25 • LIVE",pad,y+28,13,mint,false); y+=70;
+        @Override protected void onDraw(Canvas c){super.onDraw(c);float density=getResources().getDisplayMetrics().density;c.save();c.scale(density,density);float w=getWidth()/density, pad=24, y;
+            weatherHero(c,w);
+            y=570;text(c,"SENSOR DECK",pad,y,28,white,true);text(c,"Galaxy S25 • LIVE",pad,y+28,13,mint,false);y+=70;
             float pressure=values.containsKey(Sensor.TYPE_PRESSURE)?values.get(Sensor.TYPE_PRESSURE)[0]:Float.NaN;
             box(c,pad,y,w-pad,y+190);text(c,"気圧",pad+18,y+30,14,muted,false);
             text(c,Float.isNaN(pressure)?"計測中…":String.format(Locale.JAPAN,"%.1f hPa",pressure),pad+18,y+72,32,white,true);
@@ -211,12 +258,47 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
             sensorBox(c,pad+cw+gap,y,w-pad,y+ch,"近接",val(Sensor.TYPE_PROXIMITY,0,"cm"));y+=ch+gap;
             String gps=location==null?"測位中…":String.format(Locale.JAPAN,"%.5f, %.5f\n高度 %.0fm  速度 %.1fkm/h",location.getLatitude(),location.getLongitude(),location.getAltitude(),location.getSpeed()*3.6);
             gpsBox(c,pad,y,w-pad,y+128);text(c,"GPS / QZSS  •  タップで地図",pad+16,y+28,13,mint,false);multi(c,gps,pad+16,y+58,16,white);y+=144;
-            weatherBox(c,pad,y,w-pad,y+112);text(c,"現在地の天気予報  •  タップでウェザーニュース",pad+16,y+26,13,mint,false);multi(c,weather,pad+16,y+52,14,white);y+=128;
             box(c,pad,y,w-pad,y+82);text(c,"本体非搭載",pad+16,y+28,13,muted,false);text(c,"温度・湿度・心拍・水深",pad+16,y+58,15,white,false);c.restore();
+        }
+        void weatherHero(Canvas c,float w){
+            LinearGradient gradient=new LinearGradient(0,0,0,540,
+                    isDay?Color.rgb(18,71,145):Color.rgb(8,26,75),
+                    Color.rgb(7,17,31),Shader.TileMode.CLAMP);
+            p.setShader(gradient);c.drawRect(0,0,w,540,p);p.setShader(null);
+            text(c,"⌖  "+placeName,24,52,17,white,true);
+            String temp=Float.isNaN(currentTemp)?"--°":String.format(Locale.JAPAN,"%.0f°",currentTemp);
+            text(c,temp,24,150,72,white,false);
+            text(c,weatherName(currentCode),28,196,25,white,true);
+            String range=Float.isNaN(todayMax)?"予報を取得中…":
+                    String.format(Locale.JAPAN,"↑ %.0f° / ↓ %.0f°    体感 %.0f°",todayMax,todayMin,apparentTemp);
+            text(c,range,28,232,16,white,true);
+            p.setColor(Color.argb(185,8,35,67));c.drawRoundRect(18,260,w-18,520,24,24,p);
+            text(c,"1時間ごとの予報  •  タップでウェザーニュース",34,294,14,mint,true);
+            if(hourTimes==null){text(c,"GPS測位後に表示します",34,350,16,white,false);return;}
+            float left=34,right=w-34,col=(right-left)/6f,min=Float.MAX_VALUE,max=-Float.MAX_VALUE;
+            for(float v:hourTemps){min=Math.min(min,v);max=Math.max(max,v);}
+            if(max-min<1){max+=.5f;min-=.5f;}
+            Path line=new Path();
+            for(int i=0;i<6;i++){
+                float x=left+col*(i+.5f);
+                String time=hourTimes[i].length()>=16?hourTimes[i].substring(11,16):hourTimes[i];
+                text(c,time,x-17,330,12,muted,false);
+                text(c,weatherSymbol(hourCodes[i]),x-13,370,22,white,false);
+                text(c,String.format(Locale.JAPAN,"%.0f°",hourTemps[i]),x-14,402,16,white,true);
+                text(c,"💧"+hourRain[i]+"%",x-20,490,11,muted,false);
+                float gy=458-(hourTemps[i]-min)/(max-min)*30;
+                if(i==0)line.moveTo(x,gy);else line.lineTo(x,gy);
+                p.setColor(white);c.drawCircle(x,gy,4,p);
+            }
+            p.setStyle(Paint.Style.STROKE);p.setStrokeWidth(2);p.setColor(Color.rgb(210,225,238));c.drawPath(line,p);p.setStyle(Paint.Style.FILL);
+        }
+        String weatherSymbol(int code){
+            if(code==0)return "☀";if(code<=3)return "☁";if(code<=57)return "♨";
+            if(code<=67)return "☂";if(code<=77)return "❄";if(code<=86)return "☔";return "⚡";
         }
         @Override public boolean onTouchEvent(MotionEvent event){
             float y=event.getY()/getResources().getDisplayMetrics().density;
-            int card=y>=704&&y<=832?1:(y>=848&&y<=960?2:0);
+            int card=y>=1218&&y<=1346?1:(y>=260&&y<=520?2:0);
             if(event.getAction()==MotionEvent.ACTION_DOWN&&card>0){pressedCard=card;invalidate();return true;}
             if(event.getAction()==MotionEvent.ACTION_UP){
                 int activate=pressedCard==card?card:0;pressedCard=0;invalidate();
