@@ -11,9 +11,12 @@ import android.hardware.*;
 import android.location.*;
 import android.os.Bundle;
 import android.view.MotionEvent;
+import android.view.VelocityTracker;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.ViewConfiguration;
 import android.widget.LinearLayout;
+import android.widget.OverScroller;
 import android.widget.ScrollView;
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
@@ -112,7 +115,7 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
                         + "&current=temperature_2m,apparent_temperature,weather_code,is_day"
                         + "&hourly=temperature_2m,weather_code,precipitation_probability"
                         + "&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max"
-                        + "&timezone=auto&forecast_days=2", lat, lon);
+                        + "&timezone=auto&forecast_days=4", lat, lon);
                 connection = (HttpURLConnection)new URL(endpoint).openConnection();
                 connection.setConnectTimeout(8000);
                 connection.setReadTimeout(8000);
@@ -138,7 +141,7 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
                 int start = 0;
                 while (start < times.length()-1
                         && times.getString(start).compareTo(currentTime) < 0) start++;
-                int forecastCount=Math.min(24,times.length()-start);
+                int forecastCount=Math.min(72,times.length()-start);
                 String[] nextTimes = new String[forecastCount];
                 float[] nextTemps = new float[forecastCount];
                 int[] nextCodes = new int[forecastCount], nextRain = new int[forecastCount];
@@ -166,6 +169,7 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
                     dashboard.todayMin=(float)min.optDouble(0,Float.NaN);
                     dashboard.hourTimes=nextTimes;dashboard.hourTemps=nextTemps;
                     dashboard.hourCodes=nextCodes;dashboard.hourRain=nextRain;
+                    dashboard.hourScroller.forceFinished(true);
                     dashboard.hourOffset=0;dashboard.hourPosition=0;
                     getSharedPreferences("weather_widget",MODE_PRIVATE).edit()
                             .putString("place",dashboard.placeName)
@@ -277,12 +281,20 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
         final Runnable mapAction, weatherAction, fishingAction; int pressedCard,hourOffset;
         float hourPosition,touchStartHourPosition;
         boolean draggingHours,pendingSensorRedraw;
+        final OverScroller hourScroller;
+        final int minimumFlingVelocity,maximumFlingVelocity;
+        VelocityTracker velocityTracker;
         float touchDownX,touchDownY;
         final int bg=Color.rgb(7,17,31), card=Color.rgb(16,31,48), mint=Color.rgb(0,212,170), white=Color.rgb(238,246,252), muted=Color.rgb(143,163,180);
         Dashboard(Context c,Runnable mapAction,Runnable weatherAction,Runnable fishingAction){
             super(c);this.mapAction=mapAction;this.weatherAction=weatherAction;
             this.fishingAction=fishingAction;
             p.setTypeface(normalTypeface);
+            hourScroller=new OverScroller(c);
+            hourScroller.setFriction(ViewConfiguration.getScrollFriction()*1.35f);
+            ViewConfiguration configuration=ViewConfiguration.get(c);
+            minimumFlingVelocity=configuration.getScaledMinimumFlingVelocity();
+            maximumFlingVelocity=configuration.getScaledMaximumFlingVelocity();
             setBackgroundColor(bg);setClickable(true);
             setContentDescription("GPS地図と現在地の天気予報");
         }
@@ -341,6 +353,11 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
             for(int dataIndex=first;dataIndex<=last;dataIndex++){
                 float x=left+col*(dataIndex-hourPosition+.5f);
                 String time=hourTimes[dataIndex].length()>=16?hourTimes[dataIndex].substring(11,16):hourTimes[dataIndex];
+                boolean newDay=dataIndex==0||!hourTimes[dataIndex].substring(0,10).equals(hourTimes[dataIndex-1].substring(0,10));
+                if(newDay&&hourTimes[dataIndex].length()>=10){
+                    String date=hourTimes[dataIndex].substring(5,10).replace('-', '/');
+                    text(c,date,x-17,328,9,mint,true);
+                }
                 text(c,time,x-17,342,12,muted,false);
                 String symbol=weatherSymbol(hourCodes[dataIndex]);
                 text(c,symbol,x-14,380,22,white,false);
@@ -373,11 +390,15 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
             if(event.getAction()==MotionEvent.ACTION_DOWN&&card>0){
                 pressedCard=card;touchDownX=event.getX();touchDownY=event.getY();
                 if(card==2){
+                    hourScroller.forceFinished(true);
+                    if(velocityTracker==null)velocityTracker=VelocityTracker.obtain();else velocityTracker.clear();
+                    velocityTracker.addMovement(event);
                     touchStartHourPosition=hourPosition;draggingHours=false;
                 }
                 if(card==2||card==4)invalidateWeather();else invalidate();return true;
             }
             if(event.getAction()==MotionEvent.ACTION_MOVE&&pressedCard==2&&hourTimes!=null){
+                if(velocityTracker!=null)velocityTracker.addMovement(event);
                 float dx=event.getX()-touchDownX,dy=event.getY()-touchDownY;
                 if(draggingHours||(Math.abs(dx)>6*density&&Math.abs(dx)>Math.abs(dy))){
                     draggingHours=true;getParent().requestDisallowInterceptTouchEvent(true);
@@ -390,20 +411,36 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
                 }
             }
             if(event.getAction()==MotionEvent.ACTION_UP){
+                if(velocityTracker!=null)velocityTracker.addMovement(event);
                 getParent().requestDisallowInterceptTouchEvent(false);
                 int activate=pressedCard==2&&draggingHours?2:(pressedCard==card?card:0);
                 int releasedCard=pressedCard;pressedCard=0;
                 if(releasedCard==2||releasedCard==4)invalidateWeather();else invalidate();
                 if(activate==1){super.performClick();mapAction.run();}
                 if(activate==2){
+                    boolean wasDragging=draggingHours;
                     draggingHours=false;
+                    if(wasDragging&&velocityTracker!=null&&hourTimes!=null){
+                        velocityTracker.computeCurrentVelocity(1000,maximumFlingVelocity);
+                        float fingerVelocity=velocityTracker.getXVelocity();
+                        if(Math.abs(fingerVelocity)>=minimumFlingVelocity){
+                            float density=getResources().getDisplayMetrics().density;
+                            float columnPx=(getWidth()-68*density)/6f;
+                            int flingVelocity=(int)Math.max(-12000,Math.min(12000,-fingerVelocity/columnPx*1000));
+                            hourScroller.fling((int)(hourPosition*1000),0,flingVelocity,0,
+                                    0,Math.max(0,(hourTimes.length-6)*1000),0,0);
+                            invalidateWeather();
+                        }
+                    }
                 }
                 if(activate==4){super.performClick();weatherAction.run();}
                 if(activate==3){super.performClick();fishingAction.run();}
-                if(pendingSensorRedraw){pendingSensorRedraw=false;invalidateSensors();}
+                recycleVelocityTracker();
+                flushPendingSensors();
                 return true;
             }
             if(event.getAction()==MotionEvent.ACTION_CANCEL){
+                if(velocityTracker!=null)velocityTracker.addMovement(event);
                 getParent().requestDisallowInterceptTouchEvent(false);
                 int cancelledCard=pressedCard;pressedCard=0;
                 if(draggingHours){
@@ -411,7 +448,8 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
                     invalidateWeather();
                 }
                 else if(cancelledCard==2||cancelledCard==4)invalidateWeather();else invalidate();
-                if(pendingSensorRedraw){pendingSensorRedraw=false;invalidateSensors();}
+                recycleVelocityTracker();
+                flushPendingSensors();
                 return true;
             }
             return true;
@@ -421,11 +459,27 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
             postInvalidateOnAnimation(0,0,getWidth(),(int)(542*density));
         }
         void invalidateSensors(){
-            if(pressedCard==2||draggingHours){
+            if(pressedCard==2||draggingHours||!hourScroller.isFinished()){
                 pendingSensorRedraw=true;return;
             }
             float density=getResources().getDisplayMetrics().density;
             postInvalidateOnAnimation(0,(int)(538*density),getWidth(),getHeight());
+        }
+        void recycleVelocityTracker(){
+            if(velocityTracker!=null){velocityTracker.recycle();velocityTracker=null;}
+        }
+        void flushPendingSensors(){
+            if(pendingSensorRedraw&&pressedCard!=2&&!draggingHours&&hourScroller.isFinished()){
+                pendingSensorRedraw=false;invalidateSensors();
+            }
+        }
+        @Override public void computeScroll(){
+            super.computeScroll();
+            if(hourScroller.computeScrollOffset()&&hourTimes!=null){
+                hourPosition=hourScroller.getCurrX()/1000f;
+                hourOffset=Math.max(0,Math.min((int)Math.floor(hourPosition),hourTimes.length-6));
+                invalidateWeather();
+            }else flushPendingSensors();
         }
         @Override public boolean performClick(){super.performClick();return true;}
         String vector(int t,String unit){float[]v=values.get(t);return v==null?"計測中…":String.format(Locale.JAPAN,"X %.1f\nY %.1f  Z %.1f %s",v[0],v[1],v[2],unit);}
