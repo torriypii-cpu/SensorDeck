@@ -1,9 +1,6 @@
 package jp.sensordeck;
 
 import android.Manifest;
-import android.animation.Animator;
-import android.animation.AnimatorListenerAdapter;
-import android.animation.ValueAnimator;
 import android.app.Activity;
 import android.content.Context;
 import android.content.Intent;
@@ -13,11 +10,9 @@ import android.graphics.*;
 import android.hardware.*;
 import android.location.*;
 import android.os.Bundle;
-import android.view.HapticFeedbackConstants;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
-import android.view.animation.PathInterpolator;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import java.io.BufferedReader;
@@ -171,7 +166,6 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
                     dashboard.todayMin=(float)min.optDouble(0,Float.NaN);
                     dashboard.hourTimes=nextTimes;dashboard.hourTemps=nextTemps;
                     dashboard.hourCodes=nextCodes;dashboard.hourRain=nextRain;
-                    if(dashboard.hourAnimator!=null)dashboard.hourAnimator.cancel();
                     dashboard.hourOffset=0;dashboard.hourPosition=0;
                     getSharedPreferences("weather_widget",MODE_PRIVATE).edit()
                             .putString("place",dashboard.placeName)
@@ -281,16 +275,14 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
         int currentCode; boolean isDay=true;
         String[] hourTimes; float[] hourTemps; int[] hourCodes,hourRain;
         final Runnable mapAction, weatherAction, fishingAction; int pressedCard,hourOffset;
-        float hourPosition,touchStartHourPosition,dragTargetPosition;
-        boolean draggingHours,dragFramePosted,pendingSensorRedraw;
-        Runnable dragFrame;
-        ValueAnimator hourAnimator;
+        float hourPosition,touchStartHourPosition;
+        boolean draggingHours,pendingSensorRedraw;
         float touchDownX,touchDownY;
         final int bg=Color.rgb(7,17,31), card=Color.rgb(16,31,48), mint=Color.rgb(0,212,170), white=Color.rgb(238,246,252), muted=Color.rgb(143,163,180);
         Dashboard(Context c,Runnable mapAction,Runnable weatherAction,Runnable fishingAction){
             super(c);this.mapAction=mapAction;this.weatherAction=weatherAction;
             this.fishingAction=fishingAction;
-            p.setTypeface(normalTypeface);dragFrame=this::smoothDragStep;
+            p.setTypeface(normalTypeface);
             setBackgroundColor(bg);setClickable(true);
             setContentDescription("GPS地図と現在地の天気予報");
         }
@@ -336,7 +328,7 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
             p.setColor(pressedCard==4?Color.rgb(27,94,105):Color.rgb(20,65,84));
             c.drawRoundRect(w-176,270,w-30,306,18,18,p);
             text(c,"詳しい天気を見る  ›",w-163,293,12,white,true);
-            text(c,"←  1時間ずつスワイプ  →",34,316,10,muted,false);
+            text(c,"←  指に合わせて自由にスライド  →",34,316,10,muted,false);
             if(hourTimes==null){text(c,"GPS測位後に表示します",34,350,16,white,false);return;}
             float left=34,right=w-34,col=(right-left)/6f,min=Float.MAX_VALUE,max=-Float.MAX_VALUE;
             int count=Math.min(6,hourTemps.length-hourOffset);
@@ -381,8 +373,7 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
             if(event.getAction()==MotionEvent.ACTION_DOWN&&card>0){
                 pressedCard=card;touchDownX=event.getX();touchDownY=event.getY();
                 if(card==2){
-                    if(hourAnimator!=null)hourAnimator.cancel();
-                    touchStartHourPosition=hourPosition;dragTargetPosition=hourPosition;draggingHours=false;
+                    touchStartHourPosition=hourPosition;draggingHours=false;
                 }
                 if(card==2||card==4)invalidateWeather();else invalidate();return true;
             }
@@ -392,9 +383,9 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
                     draggingHours=true;getParent().requestDisallowInterceptTouchEvent(true);
                     float columnPx=(getWidth()-68*density)/6f;
                     float max=Math.max(0,hourTimes.length-6);
-                    float raw=-dx/columnPx,absolute=Math.abs(raw);
-                    float limited=absolute<=1f?raw:Math.signum(raw)*(1f+Math.min(.12f,(absolute-1f)*.12f));
-                    setDragTarget(Math.max(0,Math.min(max,touchStartHourPosition+limited)));
+                    hourPosition=Math.max(0,Math.min(max,touchStartHourPosition-dx/columnPx));
+                    hourOffset=Math.max(0,Math.min((int)Math.floor(hourPosition),hourTimes.length-6));
+                    invalidateWeather();
                     return true;
                 }
             }
@@ -405,69 +396,32 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
                 if(releasedCard==2||releasedCard==4)invalidateWeather();else invalidate();
                 if(activate==1){super.performClick();mapAction.run();}
                 if(activate==2){
-                    float dx=event.getX()-touchDownX;
-                    if(draggingHours&&hourTimes!=null){
-                        int target=Math.abs(dx)>12*density?hourOffset+(dx<0?1:-1):hourOffset;
-                        animateToHour(target);
-                    }else animateToHour(hourOffset);
                     draggingHours=false;
                 }
                 if(activate==4){super.performClick();weatherAction.run();}
                 if(activate==3){super.performClick();fishingAction.run();}
+                if(pendingSensorRedraw){pendingSensorRedraw=false;invalidateSensors();}
                 return true;
             }
             if(event.getAction()==MotionEvent.ACTION_CANCEL){
                 getParent().requestDisallowInterceptTouchEvent(false);
                 int cancelledCard=pressedCard;pressedCard=0;
-                if(draggingHours){draggingHours=false;animateToHour(hourOffset);}
+                if(draggingHours){
+                    draggingHours=false;
+                    invalidateWeather();
+                }
                 else if(cancelledCard==2||cancelledCard==4)invalidateWeather();else invalidate();
+                if(pendingSensorRedraw){pendingSensorRedraw=false;invalidateSensors();}
                 return true;
             }
             return true;
-        }
-        void animateToHour(int target){
-            if(hourTimes==null)return;
-            int maxOffset=Math.max(0,hourTimes.length-6);
-            int next=Math.max(0,Math.min(maxOffset,target));
-            if(hourAnimator!=null)hourAnimator.cancel();
-            boolean changed=next!=hourOffset;
-            hourOffset=next;
-            hourAnimator=ValueAnimator.ofFloat(hourPosition,next);
-            float distance=Math.min(1f,Math.abs(hourPosition-next));
-            hourAnimator.setDuration((long)(170+220*distance));
-            hourAnimator.setInterpolator(new PathInterpolator(.2f,0f,0f,1f));
-            hourAnimator.addUpdateListener(a->{hourPosition=(float)a.getAnimatedValue();invalidateWeather();});
-            hourAnimator.addListener(new AnimatorListenerAdapter(){
-                @Override public void onAnimationEnd(Animator animation){
-                    if(hourAnimator==animation&&!draggingHours&&pendingSensorRedraw){
-                        pendingSensorRedraw=false;invalidateSensors();
-                    }
-                }
-            });
-            hourAnimator.start();
-            if(changed)performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK);
-        }
-        void setDragTarget(float target){
-            dragTargetPosition=target;
-            if(!dragFramePosted){dragFramePosted=true;postOnAnimation(dragFrame);}
-        }
-        void smoothDragStep(){
-            dragFramePosted=false;
-            if(!draggingHours)return;
-            float difference=dragTargetPosition-hourPosition;
-            if(Math.abs(difference)<.002f)hourPosition=dragTargetPosition;
-            else{
-                hourPosition+=difference*.52f;
-                dragFramePosted=true;postOnAnimation(dragFrame);
-            }
-            invalidateWeather();
         }
         void invalidateWeather(){
             float density=getResources().getDisplayMetrics().density;
             postInvalidateOnAnimation(0,0,getWidth(),(int)(542*density));
         }
         void invalidateSensors(){
-            if(pressedCard==2||draggingHours||(hourAnimator!=null&&hourAnimator.isRunning())){
+            if(pressedCard==2||draggingHours){
                 pendingSensorRedraw=true;return;
             }
             float density=getResources().getDisplayMetrics().density;
