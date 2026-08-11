@@ -35,8 +35,7 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
         super.onCreate(state);
         dashboard = new Dashboard(this,
                 () -> startActivity(new Intent(this, MapActivity.class)),
-                () -> startActivity(new Intent(Intent.ACTION_VIEW,
-                        Uri.parse("https://weathernews.jp/"))));
+                this::openWeatherNews);
         ScrollView scroll = new ScrollView(this);
         scroll.setFillViewport(true);
         scroll.setClipToPadding(false);
@@ -143,6 +142,17 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
                 if (connection != null) connection.disconnect();
             }
         }).start();
+    }
+
+    private void openWeatherNews() {
+        Intent app = getPackageManager().getLaunchIntentForPackage("wni.WeathernewsTouch.jp");
+        if (app != null) {
+            app.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            startActivity(app);
+        } else {
+            startActivity(new Intent(Intent.ACTION_VIEW,
+                    Uri.parse("https://weathernews.jp/")));
+        }
     }
 
     private static String weatherName(int code) {
