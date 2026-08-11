@@ -20,6 +20,7 @@
                 android:resource="@xml/weather_widget_info" />
         </receiver>
         <activity android:name=".MapActivity" android:exported="false" />
+        <activity android:name=".FishingActivity" android:exported="false" />
         <activity android:name=".MainActivity" android:screenOrientation="portrait" android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
