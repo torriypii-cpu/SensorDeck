@@ -1,6 +1,7 @@
 package jp.sensordeck;
 
 import android.Manifest;
+import android.animation.ValueAnimator;
 import android.app.Activity;
 import android.content.Context;
 import android.content.Intent;
@@ -103,6 +104,7 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
         dashboard.weather = "現在地の予報を取得中…";
         dashboard.invalidate();
         double lat = location.getLatitude(), lon = location.getLongitude();
+        fetchPlaceAndWeatherNews(lat,lon);
         new Thread(() -> {
             HttpURLConnection connection = null;
             try {
@@ -137,10 +139,11 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
                 int start = 0;
                 while (start < times.length()-1
                         && times.getString(start).compareTo(currentTime) < 0) start++;
-                String[] nextTimes = new String[6];
-                float[] nextTemps = new float[6];
-                int[] nextCodes = new int[6], nextRain = new int[6];
-                for (int i=0;i<6;i++) {
+                int forecastCount=Math.min(24,times.length()-start);
+                String[] nextTimes = new String[forecastCount];
+                float[] nextTemps = new float[forecastCount];
+                int[] nextCodes = new int[forecastCount], nextRain = new int[forecastCount];
+                for (int i=0;i<forecastCount;i++) {
                     int index=Math.min(start+i,times.length()-1);
                     nextTimes[i]=times.getString(index);
                     nextTemps[i]=(float)hourlyTemps.getDouble(index);
@@ -154,45 +157,8 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
                         min.getDouble(0), max.getDouble(0), rain.getInt(0),
                         min.getDouble(1), max.getDouble(1),
                         weatherName(codes.getInt(1)), rain.getInt(1));
-                String place = "現在地";
-                try {
-                    List<Address> addresses = new Geocoder(this, Locale.JAPAN)
-                            .getFromLocation(lat, lon, 1);
-                    if (addresses != null && !addresses.isEmpty()) {
-                        Address a=addresses.get(0);
-                        place=a.getSubLocality()!=null?a.getSubLocality():
-                                (a.getLocality()!=null?a.getLocality():"現在地");
-                    }
-                } catch (Exception ignored) {}
-                String finalPlace=place;
-                String localWeatherNewsUrl="https://weathernews.jp/";
-                HttpURLConnection addressConnection=null;
-                try {
-                    String addressEndpoint=String.format(Locale.US,
-                            "https://mreversegeocoder.gsi.go.jp/reverse-geocoder/LonLatToAddress"
-                            + "?lat=%.6f&lon=%.6f",lat,lon);
-                    addressConnection=(HttpURLConnection)new URL(addressEndpoint).openConnection();
-                    addressConnection.setConnectTimeout(8000);
-                    addressConnection.setReadTimeout(8000);
-                    StringBuilder addressBody=new StringBuilder();
-                    try(BufferedReader reader=new BufferedReader(
-                            new InputStreamReader(addressConnection.getInputStream()))){
-                        String line;while((line=reader.readLine())!=null)addressBody.append(line);
-                    }
-                    String municipality=new JSONObject(addressBody.toString())
-                            .getJSONObject("results").getString("muniCd");
-                    int prefecture=Integer.parseInt(municipality.substring(0,2));
-                    String slug=prefectureSlug(prefecture);
-                    if(slug!=null) localWeatherNewsUrl="https://weathernews.jp/onebox/tenki/"
-                            +slug+"/"+municipality+"/";
-                } catch(Exception ignored) {
-                } finally {
-                    if(addressConnection!=null)addressConnection.disconnect();
-                }
-                String finalWeatherNewsUrl=localWeatherNewsUrl;
                 runOnUiThread(() -> {
-                    weatherNewsUrl=finalWeatherNewsUrl;
-                    dashboard.weather=result;dashboard.placeName=finalPlace;
+                    dashboard.weather=result;
                     dashboard.currentTemp=(float)current.optDouble("temperature_2m",Float.NaN);
                     dashboard.apparentTemp=(float)current.optDouble("apparent_temperature",Float.NaN);
                     dashboard.currentCode=current.optInt("weather_code",0);
@@ -201,8 +167,9 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
                     dashboard.todayMin=(float)min.optDouble(0,Float.NaN);
                     dashboard.hourTimes=nextTimes;dashboard.hourTemps=nextTemps;
                     dashboard.hourCodes=nextCodes;dashboard.hourRain=nextRain;
+                    dashboard.hourOffset=0;
                     getSharedPreferences("weather_widget",MODE_PRIVATE).edit()
-                            .putString("place",finalPlace)
+                            .putString("place",dashboard.placeName)
                             .putString("condition",weatherName(current.optInt("weather_code",0)))
                             .putFloat("temp",(float)current.optDouble("temperature_2m",Float.NaN))
                             .putFloat("max",(float)max.optDouble(0,Float.NaN))
@@ -218,6 +185,40 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
                 });
             } finally {
                 if (connection != null) connection.disconnect();
+            }
+        }).start();
+    }
+
+    private void fetchPlaceAndWeatherNews(double lat,double lon) {
+        new Thread(() -> {
+            HttpURLConnection connection=null;
+            try {
+                String endpoint=String.format(Locale.US,
+                        "https://mreversegeocoder.gsi.go.jp/reverse-geocoder/LonLatToAddress"
+                        +"?lat=%.6f&lon=%.6f",lat,lon);
+                connection=(HttpURLConnection)new URL(endpoint).openConnection();
+                connection.setConnectTimeout(6000);connection.setReadTimeout(6000);
+                StringBuilder body=new StringBuilder();
+                try(BufferedReader reader=new BufferedReader(
+                        new InputStreamReader(connection.getInputStream()))){
+                    String line;while((line=reader.readLine())!=null)body.append(line);
+                }
+                JSONObject result=new JSONObject(body.toString()).getJSONObject("results");
+                String municipality=result.getString("muniCd");
+                String place=result.optString("lv01Nm","現在地");
+                int prefecture=Integer.parseInt(municipality.substring(0,2));
+                String slug=prefectureSlug(prefecture);
+                String url=slug==null?"https://weathernews.jp/":
+                        "https://weathernews.jp/onebox/tenki/"+slug+"/"+municipality+"/";
+                runOnUiThread(() -> {
+                    dashboard.placeName=place;weatherNewsUrl=url;dashboard.invalidate();
+                    getSharedPreferences("weather_widget",MODE_PRIVATE).edit()
+                            .putString("place",place).apply();
+                    WeatherWidgetProvider.updateAll(this);
+                });
+            } catch(Exception ignored) {
+            } finally {
+                if(connection!=null)connection.disconnect();
             }
         }).start();
     }
@@ -271,7 +272,10 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
         float currentTemp=Float.NaN,apparentTemp=Float.NaN,todayMax=Float.NaN,todayMin=Float.NaN;
         int currentCode; boolean isDay=true;
         String[] hourTimes; float[] hourTemps; int[] hourCodes,hourRain;
-        final Runnable mapAction, weatherAction, fishingAction; int pressedCard;
+        final Runnable mapAction, weatherAction, fishingAction; int pressedCard,hourOffset;
+        float hourSlide;
+        ValueAnimator hourAnimator;
+        float touchDownX,touchDownY;
         final int bg=Color.rgb(7,17,31), card=Color.rgb(16,31,48), mint=Color.rgb(0,212,170), white=Color.rgb(238,246,252), muted=Color.rgb(143,163,180);
         Dashboard(Context c,Runnable mapAction,Runnable weatherAction,Runnable fishingAction){
             super(c);this.mapAction=mapAction;this.weatherAction=weatherAction;
@@ -315,24 +319,27 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
                     String.format(Locale.JAPAN,"↑ %.0f° / ↓ %.0f°    体感 %.0f°",todayMax,todayMin,apparentTemp);
             text(c,range,28,232,16,white,true);
             p.setColor(Color.argb(185,8,35,67));c.drawRoundRect(18,260,w-18,520,24,24,p);
-            text(c,"1時間ごとの予報  •  タップでウェザーニュース",34,294,14,mint,true);
+            text(c,"1時間予報  •  左右スワイプ  •  タップでウェザーニュース",34,294,13,mint,true);
             if(hourTimes==null){text(c,"GPS測位後に表示します",34,350,16,white,false);return;}
             float left=34,right=w-34,col=(right-left)/6f,min=Float.MAX_VALUE,max=-Float.MAX_VALUE;
-            for(float v:hourTemps){min=Math.min(min,v);max=Math.max(max,v);}
+            int count=Math.min(6,hourTemps.length-hourOffset);
+            for(int i=0;i<count;i++){float v=hourTemps[hourOffset+i];min=Math.min(min,v);max=Math.max(max,v);}
             if(max-min<1){max+=.5f;min-=.5f;}
             Path line=new Path();
-            for(int i=0;i<6;i++){
-                float x=left+col*(i+.5f);
-                String time=hourTimes[i].length()>=16?hourTimes[i].substring(11,16):hourTimes[i];
+            for(int i=0;i<count;i++){
+                int dataIndex=hourOffset+i;
+                float x=left+col*(i+.5f)+hourSlide;
+                String time=hourTimes[dataIndex].length()>=16?hourTimes[dataIndex].substring(11,16):hourTimes[dataIndex];
                 text(c,time,x-17,330,12,muted,false);
-                text(c,weatherSymbol(hourCodes[i]),x-13,370,22,white,false);
-                text(c,String.format(Locale.JAPAN,"%.0f°",hourTemps[i]),x-14,402,16,white,true);
-                text(c,"💧"+hourRain[i]+"%",x-20,490,11,muted,false);
-                float gy=458-(hourTemps[i]-min)/(max-min)*30;
+                text(c,weatherSymbol(hourCodes[dataIndex]),x-13,370,22,white,false);
+                text(c,String.format(Locale.JAPAN,"%.0f°",hourTemps[dataIndex]),x-14,402,16,white,true);
+                text(c,"💧"+hourRain[dataIndex]+"%",x-20,490,11,muted,false);
+                float gy=458-(hourTemps[dataIndex]-min)/(max-min)*30;
                 if(i==0)line.moveTo(x,gy);else line.lineTo(x,gy);
                 p.setColor(white);c.drawCircle(x,gy,4,p);
             }
             p.setStyle(Paint.Style.STROKE);p.setStrokeWidth(2);p.setColor(Color.rgb(210,225,238));c.drawPath(line,p);p.setStyle(Paint.Style.FILL);
+            text(c,(hourOffset+1)+"–"+(hourOffset+count)+" / "+hourTemps.length+"時間",w-116,510,11,muted,false);
         }
         String weatherSymbol(int code){
             if(code==0)return "☀";if(code<=3)return "☁";if(code<=57)return "♨";
@@ -341,16 +348,35 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
         @Override public boolean onTouchEvent(MotionEvent event){
             float y=event.getY()/getResources().getDisplayMetrics().density;
             int card=y>=1218&&y<=1346?1:(y>=260&&y<=520?2:(y>=1362&&y<=1450?3:0));
-            if(event.getAction()==MotionEvent.ACTION_DOWN&&card>0){pressedCard=card;invalidate();return true;}
+            if(event.getAction()==MotionEvent.ACTION_DOWN&&card>0){
+                pressedCard=card;touchDownX=event.getX();touchDownY=event.getY();invalidate();return true;
+            }
             if(event.getAction()==MotionEvent.ACTION_UP){
                 int activate=pressedCard==card?card:0;pressedCard=0;invalidate();
                 if(activate==1){super.performClick();mapAction.run();}
-                if(activate==2){super.performClick();weatherAction.run();}
+                if(activate==2){
+                    float dx=event.getX()-touchDownX;
+                    if(Math.abs(dx)>50&&hourTimes!=null){
+                        slideOneHour(dx<0?1:-1);
+                    }else{super.performClick();weatherAction.run();}
+                }
                 if(activate==3){super.performClick();fishingAction.run();}
                 return true;
             }
             if(event.getAction()==MotionEvent.ACTION_CANCEL){pressedCard=0;invalidate();return true;}
             return true;
+        }
+        void slideOneHour(int direction){
+            int maxOffset=Math.max(0,hourTimes.length-6);
+            int next=Math.max(0,Math.min(maxOffset,hourOffset+direction));
+            if(next==hourOffset)return;
+            if(hourAnimator!=null)hourAnimator.cancel();
+            hourOffset=next;
+            float column=(getWidth()/getResources().getDisplayMetrics().density-68)/6f;
+            hourAnimator=ValueAnimator.ofFloat(direction>0?column:-column,0f);
+            hourAnimator.setDuration(420);
+            hourAnimator.addUpdateListener(a->{hourSlide=(float)a.getAnimatedValue();invalidate();});
+            hourAnimator.start();
         }
         @Override public boolean performClick(){super.performClick();return true;}
         String vector(int t,String unit){float[]v=values.get(t);return v==null?"計測中…":String.format(Locale.JAPAN,"X %.1f\nY %.1f  Z %.1f %s",v[0],v[1],v[2],unit);}

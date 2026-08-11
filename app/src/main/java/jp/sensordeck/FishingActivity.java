@@ -46,6 +46,8 @@ public class FishingActivity extends Activity implements LocationListener {
         root.setBackgroundColor(navy);
 
         Button back=new Button(this);back.setText("← 戻る");
+        back.setTextColor(mint);back.setTextSize(14);back.setAllCaps(false);
+        back.setBackground(cardBackground());
         back.setOnClickListener(v->finish());
         root.addView(back,new LinearLayout.LayoutParams(dp(100),dp(48)));
         root.addView(label("FISHING DECK",30,white,true,dp(12)));
