@@ -14,6 +14,7 @@ import android.os.Bundle;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.animation.DecelerateInterpolator;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import java.io.BufferedReader;
@@ -167,7 +168,8 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
                     dashboard.todayMin=(float)min.optDouble(0,Float.NaN);
                     dashboard.hourTimes=nextTimes;dashboard.hourTemps=nextTemps;
                     dashboard.hourCodes=nextCodes;dashboard.hourRain=nextRain;
-                    dashboard.hourOffset=0;
+                    if(dashboard.hourAnimator!=null)dashboard.hourAnimator.cancel();
+                    dashboard.hourOffset=0;dashboard.hourPosition=0;
                     getSharedPreferences("weather_widget",MODE_PRIVATE).edit()
                             .putString("place",dashboard.placeName)
                             .putString("condition",weatherName(current.optInt("weather_code",0)))
@@ -273,7 +275,8 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
         int currentCode; boolean isDay=true;
         String[] hourTimes; float[] hourTemps; int[] hourCodes,hourRain;
         final Runnable mapAction, weatherAction, fishingAction; int pressedCard,hourOffset;
-        float hourSlide;
+        float hourPosition,touchStartHourPosition;
+        boolean draggingHours;
         ValueAnimator hourAnimator;
         float touchDownX,touchDownY;
         final int bg=Color.rgb(7,17,31), card=Color.rgb(16,31,48), mint=Color.rgb(0,212,170), white=Color.rgb(238,246,252), muted=Color.rgb(143,163,180);
@@ -323,59 +326,96 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
             if(hourTimes==null){text(c,"GPS測位後に表示します",34,350,16,white,false);return;}
             float left=34,right=w-34,col=(right-left)/6f,min=Float.MAX_VALUE,max=-Float.MAX_VALUE;
             int count=Math.min(6,hourTemps.length-hourOffset);
-            for(int i=0;i<count;i++){float v=hourTemps[hourOffset+i];min=Math.min(min,v);max=Math.max(max,v);}
+            for(float v:hourTemps){min=Math.min(min,v);max=Math.max(max,v);}
             if(max-min<1){max+=.5f;min-=.5f;}
+            int first=Math.max(0,(int)Math.floor(hourPosition));
+            int last=Math.min(hourTemps.length-1,(int)Math.ceil(hourPosition)+6);
             Path line=new Path();
-            for(int i=0;i<count;i++){
-                int dataIndex=hourOffset+i;
-                float x=left+col*(i+.5f)+hourSlide;
+            c.save();c.clipRect(24,304,w-24,500);
+            for(int dataIndex=first;dataIndex<=last;dataIndex++){
+                float x=left+col*(dataIndex-hourPosition+.5f);
                 String time=hourTimes[dataIndex].length()>=16?hourTimes[dataIndex].substring(11,16):hourTimes[dataIndex];
                 text(c,time,x-17,330,12,muted,false);
-                text(c,weatherSymbol(hourCodes[dataIndex]),x-13,370,22,white,false);
+                String symbol=weatherSymbol(hourCodes[dataIndex]);
+                boolean compact=symbol.length()>1;
+                text(c,symbol,x-(compact?16:13),370,compact?15:22,white,false);
                 text(c,String.format(Locale.JAPAN,"%.0f°",hourTemps[dataIndex]),x-14,402,16,white,true);
                 text(c,"💧"+hourRain[dataIndex]+"%",x-20,490,11,muted,false);
                 float gy=458-(hourTemps[dataIndex]-min)/(max-min)*30;
-                if(i==0)line.moveTo(x,gy);else line.lineTo(x,gy);
+                if(dataIndex==first)line.moveTo(x,gy);else line.lineTo(x,gy);
                 p.setColor(white);c.drawCircle(x,gy,4,p);
             }
             p.setStyle(Paint.Style.STROKE);p.setStrokeWidth(2);p.setColor(Color.rgb(210,225,238));c.drawPath(line,p);p.setStyle(Paint.Style.FILL);
+            c.restore();
             text(c,(hourOffset+1)+"–"+(hourOffset+count)+" / "+hourTemps.length+"時間",w-116,510,11,muted,false);
         }
         String weatherSymbol(int code){
-            if(code==0)return "☀";if(code<=3)return "☁";if(code<=57)return "♨";
-            if(code<=67)return "☂";if(code<=77)return "❄";if(code<=86)return "☔";return "⚡";
+            if(code==0)return "☀";
+            if(code<=3)return "☁";
+            if(code==45||code==48)return "霧";
+            if(code<=57)return "小雨";
+            if(code<=67)return "雨";
+            if(code<=77)return "雪";
+            if(code<=82)return "雨";
+            if(code<=86)return "雪";
+            return "雷";
         }
         @Override public boolean onTouchEvent(MotionEvent event){
             float y=event.getY()/getResources().getDisplayMetrics().density;
             int card=y>=1218&&y<=1346?1:(y>=260&&y<=520?2:(y>=1362&&y<=1450?3:0));
             if(event.getAction()==MotionEvent.ACTION_DOWN&&card>0){
-                pressedCard=card;touchDownX=event.getX();touchDownY=event.getY();invalidate();return true;
+                pressedCard=card;touchDownX=event.getX();touchDownY=event.getY();
+                if(card==2){
+                    if(hourAnimator!=null)hourAnimator.cancel();
+                    touchStartHourPosition=hourPosition;draggingHours=false;
+                }
+                invalidate();return true;
+            }
+            if(event.getAction()==MotionEvent.ACTION_MOVE&&pressedCard==2&&hourTimes!=null){
+                float dx=event.getX()-touchDownX,dy=event.getY()-touchDownY;
+                if(draggingHours||(Math.abs(dx)>8&&Math.abs(dx)>Math.abs(dy))){
+                    draggingHours=true;getParent().requestDisallowInterceptTouchEvent(true);
+                    float density=getResources().getDisplayMetrics().density;
+                    float columnPx=(getWidth()-68*density)/6f;
+                    float max=Math.max(0,hourTimes.length-6);
+                    hourPosition=Math.max(0,Math.min(max,touchStartHourPosition-dx/columnPx));
+                    invalidate();return true;
+                }
             }
             if(event.getAction()==MotionEvent.ACTION_UP){
+                getParent().requestDisallowInterceptTouchEvent(false);
                 int activate=pressedCard==card?card:0;pressedCard=0;invalidate();
                 if(activate==1){super.performClick();mapAction.run();}
                 if(activate==2){
                     float dx=event.getX()-touchDownX;
-                    if(Math.abs(dx)>50&&hourTimes!=null){
-                        slideOneHour(dx<0?1:-1);
+                    if(draggingHours&&hourTimes!=null){
+                        float density=getResources().getDisplayMetrics().density;
+                        float columnPx=(getWidth()-68*density)/6f;
+                        int target=Math.abs(dx)>columnPx*.18f?hourOffset+(dx<0?1:-1):hourOffset;
+                        animateToHour(target);
                     }else{super.performClick();weatherAction.run();}
+                    draggingHours=false;
                 }
                 if(activate==3){super.performClick();fishingAction.run();}
                 return true;
             }
-            if(event.getAction()==MotionEvent.ACTION_CANCEL){pressedCard=0;invalidate();return true;}
+            if(event.getAction()==MotionEvent.ACTION_CANCEL){
+                getParent().requestDisallowInterceptTouchEvent(false);
+                pressedCard=0;
+                if(draggingHours){draggingHours=false;animateToHour(hourOffset);}else invalidate();
+                return true;
+            }
             return true;
         }
-        void slideOneHour(int direction){
+        void animateToHour(int target){
             int maxOffset=Math.max(0,hourTimes.length-6);
-            int next=Math.max(0,Math.min(maxOffset,hourOffset+direction));
-            if(next==hourOffset)return;
+            int next=Math.max(0,Math.min(maxOffset,target));
             if(hourAnimator!=null)hourAnimator.cancel();
             hourOffset=next;
-            float column=(getWidth()/getResources().getDisplayMetrics().density-68)/6f;
-            hourAnimator=ValueAnimator.ofFloat(direction>0?column:-column,0f);
-            hourAnimator.setDuration(420);
-            hourAnimator.addUpdateListener(a->{hourSlide=(float)a.getAnimatedValue();invalidate();});
+            hourAnimator=ValueAnimator.ofFloat(hourPosition,next);
+            hourAnimator.setDuration(560);
+            hourAnimator.setInterpolator(new DecelerateInterpolator(1.7f));
+            hourAnimator.addUpdateListener(a->{hourPosition=(float)a.getAnimatedValue();invalidate();});
             hourAnimator.start();
         }
         @Override public boolean performClick(){super.performClick();return true;}
