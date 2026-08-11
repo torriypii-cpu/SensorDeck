@@ -10,21 +10,44 @@ import android.location.*;
 import android.os.Bundle;
 import android.view.View;
 import android.view.ViewGroup;
+import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import java.util.*;
+import org.osmdroid.config.Configuration;
+import org.osmdroid.util.GeoPoint;
+import org.osmdroid.views.MapView;
+import org.osmdroid.views.overlay.Marker;
 
 public class MainActivity extends Activity implements SensorEventListener, LocationListener {
     private SensorManager sensors;
     private Dashboard dashboard;
+    private LocationManager locationManager;
+    private MapView map;
+    private Marker positionMarker;
+    private boolean mapCentered;
     private final float[] accel = new float[3], magnetic = new float[3];
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
+        Configuration.getInstance().setUserAgentValue(getPackageName());
         dashboard = new Dashboard(this);
         ScrollView scroll = new ScrollView(this);
         scroll.setFillViewport(true);
-        int height = (int)(1120 * getResources().getDisplayMetrics().density);
-        scroll.addView(dashboard, new ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, height));
+        scroll.setClipToPadding(false);
+        float density = getResources().getDisplayMetrics().density;
+        LinearLayout content = new LinearLayout(this);
+        content.setOrientation(LinearLayout.VERTICAL);
+        content.setPadding(0, 0, 0, (int)(32 * density));
+        content.addView(dashboard, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, (int)(1040 * density)));
+
+        map = new MapView(this);
+        map.setMultiTouchControls(true);
+        map.getController().setZoom(16.0);
+        content.addView(map, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, (int)(360 * density)));
+        scroll.addView(content, new ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         setContentView(scroll);
         sensors = (SensorManager)getSystemService(SENSOR_SERVICE);
         register(Sensor.TYPE_PRESSURE); register(Sensor.TYPE_ACCELEROMETER);
@@ -42,9 +65,9 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
     }
 
     private void startLocation() {
-        LocationManager lm = (LocationManager)getSystemService(LOCATION_SERVICE);
+        locationManager = (LocationManager)getSystemService(LOCATION_SERVICE);
         if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED)
-            lm.requestLocationUpdates(LocationManager.GPS_PROVIDER, 1000, 0, this);
+            locationManager.requestLocationUpdates(LocationManager.GPS_PROVIDER, 1000, 0, this);
     }
 
     @Override public void onRequestPermissionsResult(int r, String[] p, int[] g) {
@@ -63,9 +86,40 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
         dashboard.invalidate();
     }
     @Override public void onAccuracyChanged(Sensor s,int a) {}
-    @Override public void onLocationChanged(Location l) { dashboard.location=l; dashboard.invalidate(); }
-    @Override protected void onPause(){super.onPause(); sensors.unregisterListener(this);}
-    @Override protected void onResume(){super.onResume(); if(sensors!=null){register(Sensor.TYPE_PRESSURE);register(Sensor.TYPE_ACCELEROMETER);register(Sensor.TYPE_GYROSCOPE);register(Sensor.TYPE_MAGNETIC_FIELD);register(Sensor.TYPE_LIGHT);register(Sensor.TYPE_PROXIMITY);}}
+    @Override public void onLocationChanged(Location l) {
+        dashboard.location=l;
+        dashboard.invalidate();
+        GeoPoint point = new GeoPoint(l.getLatitude(), l.getLongitude());
+        if (positionMarker == null) {
+            positionMarker = new Marker(map);
+            positionMarker.setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM);
+            positionMarker.setTitle("現在地");
+            map.getOverlays().add(positionMarker);
+        }
+        positionMarker.setPosition(point);
+        positionMarker.setSnippet(String.format(Locale.JAPAN, "精度 ±%.0fm", l.getAccuracy()));
+        if (!mapCentered) {
+            map.getController().setCenter(point);
+            mapCentered = true;
+        }
+        map.invalidate();
+    }
+    @Override protected void onPause(){
+        super.onPause();
+        sensors.unregisterListener(this);
+        if(locationManager!=null) locationManager.removeUpdates(this);
+        if(map!=null) map.onPause();
+    }
+    @Override protected void onResume(){
+        super.onResume();
+        if(map!=null) map.onResume();
+        if(sensors!=null){
+            register(Sensor.TYPE_PRESSURE);register(Sensor.TYPE_ACCELEROMETER);
+            register(Sensor.TYPE_GYROSCOPE);register(Sensor.TYPE_MAGNETIC_FIELD);
+            register(Sensor.TYPE_LIGHT);register(Sensor.TYPE_PROXIMITY);
+            if(checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION)==PackageManager.PERMISSION_GRANTED) startLocation();
+        }
+    }
 
     static class Dashboard extends View {
         final Paint p = new Paint(3); final Map<Integer,float[]> values=new HashMap<>();
