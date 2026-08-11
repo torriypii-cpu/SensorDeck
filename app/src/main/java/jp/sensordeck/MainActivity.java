@@ -3,6 +3,7 @@ package jp.sensordeck;
 import android.Manifest;
 import android.app.Activity;
 import android.content.Context;
+import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.graphics.*;
 import android.hardware.*;
@@ -10,26 +11,19 @@ import android.location.*;
 import android.os.Bundle;
 import android.view.View;
 import android.view.ViewGroup;
+import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import java.util.*;
-import org.osmdroid.config.Configuration;
-import org.osmdroid.util.GeoPoint;
-import org.osmdroid.views.MapView;
-import org.osmdroid.views.overlay.Marker;
 
 public class MainActivity extends Activity implements SensorEventListener, LocationListener {
     private SensorManager sensors;
     private Dashboard dashboard;
     private LocationManager locationManager;
-    private MapView map;
-    private Marker positionMarker;
-    private boolean mapCentered;
     private final float[] accel = new float[3], magnetic = new float[3];
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
-        Configuration.getInstance().setUserAgentValue(getPackageName());
         dashboard = new Dashboard(this);
         ScrollView scroll = new ScrollView(this);
         scroll.setFillViewport(true);
@@ -41,11 +35,17 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
         content.addView(dashboard, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, (int)(1040 * density)));
 
-        map = new MapView(this);
-        map.setMultiTouchControls(true);
-        map.getController().setZoom(16.0);
-        content.addView(map, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, (int)(360 * density)));
+        Button mapButton = new Button(this);
+        mapButton.setText("GPS地図を開く");
+        mapButton.setTextSize(17);
+        mapButton.setTextColor(Color.rgb(7,17,31));
+        mapButton.setBackgroundColor(Color.rgb(0,212,170));
+        mapButton.setOnClickListener(v -> startActivity(new Intent(this, MapActivity.class)));
+        LinearLayout.LayoutParams buttonParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, (int)(64 * density));
+        buttonParams.setMargins((int)(24*density), (int)(8*density),
+                (int)(24*density), (int)(20*density));
+        content.addView(mapButton, buttonParams);
         scroll.addView(content, new ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         setContentView(scroll);
@@ -89,30 +89,14 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
     @Override public void onLocationChanged(Location l) {
         dashboard.location=l;
         dashboard.invalidate();
-        GeoPoint point = new GeoPoint(l.getLatitude(), l.getLongitude());
-        if (positionMarker == null) {
-            positionMarker = new Marker(map);
-            positionMarker.setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM);
-            positionMarker.setTitle("現在地");
-            map.getOverlays().add(positionMarker);
-        }
-        positionMarker.setPosition(point);
-        positionMarker.setSnippet(String.format(Locale.JAPAN, "精度 ±%.0fm", l.getAccuracy()));
-        if (!mapCentered) {
-            map.getController().setCenter(point);
-            mapCentered = true;
-        }
-        map.invalidate();
     }
     @Override protected void onPause(){
         super.onPause();
         sensors.unregisterListener(this);
         if(locationManager!=null) locationManager.removeUpdates(this);
-        if(map!=null) map.onPause();
     }
     @Override protected void onResume(){
         super.onResume();
-        if(map!=null) map.onResume();
         if(sensors!=null){
             register(Sensor.TYPE_PRESSURE);register(Sensor.TYPE_ACCELEROMETER);
             register(Sensor.TYPE_GYROSCOPE);register(Sensor.TYPE_MAGNETIC_FIELD);
