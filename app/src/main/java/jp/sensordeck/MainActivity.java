@@ -11,10 +11,11 @@ import android.graphics.*;
 import android.hardware.*;
 import android.location.*;
 import android.os.Bundle;
+import android.view.HapticFeedbackConstants;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
-import android.view.animation.DecelerateInterpolator;
+import android.view.animation.PathInterpolator;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import java.io.BufferedReader;
@@ -322,7 +323,11 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
                     String.format(Locale.JAPAN,"↑ %.0f° / ↓ %.0f°    体感 %.0f°",todayMax,todayMin,apparentTemp);
             text(c,range,28,232,16,white,true);
             p.setColor(Color.argb(185,8,35,67));c.drawRoundRect(18,260,w-18,520,24,24,p);
-            text(c,"1時間予報  •  左右スワイプ  •  タップでウェザーニュース",34,294,13,mint,true);
+            text(c,"1時間予報",34,294,14,mint,true);
+            p.setColor(pressedCard==4?Color.rgb(27,94,105):Color.rgb(20,65,84));
+            c.drawRoundRect(w-176,270,w-30,306,18,18,p);
+            text(c,"詳しい天気を見る  ›",w-163,293,12,white,true);
+            text(c,"←  1時間ずつスワイプ  →",34,316,10,muted,false);
             if(hourTimes==null){text(c,"GPS測位後に表示します",34,350,16,white,false);return;}
             float left=34,right=w-34,col=(right-left)/6f,min=Float.MAX_VALUE,max=-Float.MAX_VALUE;
             int count=Math.min(6,hourTemps.length-hourOffset);
@@ -331,15 +336,14 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
             int first=Math.max(0,(int)Math.floor(hourPosition));
             int last=Math.min(hourTemps.length-1,(int)Math.ceil(hourPosition)+6);
             Path line=new Path();
-            c.save();c.clipRect(24,304,w-24,500);
+            c.save();c.clipRect(24,320,w-24,500);
             for(int dataIndex=first;dataIndex<=last;dataIndex++){
                 float x=left+col*(dataIndex-hourPosition+.5f);
                 String time=hourTimes[dataIndex].length()>=16?hourTimes[dataIndex].substring(11,16):hourTimes[dataIndex];
-                text(c,time,x-17,330,12,muted,false);
+                text(c,time,x-17,342,12,muted,false);
                 String symbol=weatherSymbol(hourCodes[dataIndex]);
-                boolean compact=symbol.length()>1;
-                text(c,symbol,x-(compact?16:13),370,compact?15:22,white,false);
-                text(c,String.format(Locale.JAPAN,"%.0f°",hourTemps[dataIndex]),x-14,402,16,white,true);
+                text(c,symbol,x-14,380,22,white,false);
+                text(c,String.format(Locale.JAPAN,"%.0f°",hourTemps[dataIndex]),x-14,412,16,white,true);
                 text(c,"💧"+hourRain[dataIndex]+"%",x-20,490,11,muted,false);
                 float gy=458-(hourTemps[dataIndex]-min)/(max-min)*30;
                 if(dataIndex==first)line.moveTo(x,gy);else line.lineTo(x,gy);
@@ -352,17 +356,19 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
         String weatherSymbol(int code){
             if(code==0)return "☀";
             if(code<=3)return "☁";
-            if(code==45||code==48)return "霧";
-            if(code<=57)return "小雨";
-            if(code<=67)return "雨";
-            if(code<=77)return "雪";
-            if(code<=82)return "雨";
-            if(code<=86)return "雪";
-            return "雷";
+            if(code==45||code==48)return "🌫";
+            if(code<=57)return "☔";
+            if(code<=67)return "🌧";
+            if(code<=77)return "🌨";
+            if(code<=82)return "☔";
+            if(code<=86)return "🌨";
+            return "⛈";
         }
         @Override public boolean onTouchEvent(MotionEvent event){
-            float y=event.getY()/getResources().getDisplayMetrics().density;
-            int card=y>=1218&&y<=1346?1:(y>=260&&y<=520?2:(y>=1362&&y<=1450?3:0));
+            float density=getResources().getDisplayMetrics().density;
+            float x=event.getX()/density,y=event.getY()/density,w=getWidth()/density;
+            boolean detailButton=y>=260&&y<=316&&x>=w-184;
+            int card=y>=1218&&y<=1346?1:(y>=260&&y<=520?(detailButton?4:2):(y>=1362&&y<=1450?3:0));
             if(event.getAction()==MotionEvent.ACTION_DOWN&&card>0){
                 pressedCard=card;touchDownX=event.getX();touchDownY=event.getY();
                 if(card==2){
@@ -373,29 +379,29 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
             }
             if(event.getAction()==MotionEvent.ACTION_MOVE&&pressedCard==2&&hourTimes!=null){
                 float dx=event.getX()-touchDownX,dy=event.getY()-touchDownY;
-                if(draggingHours||(Math.abs(dx)>8&&Math.abs(dx)>Math.abs(dy))){
+                if(draggingHours||(Math.abs(dx)>6*density&&Math.abs(dx)>Math.abs(dy))){
                     draggingHours=true;getParent().requestDisallowInterceptTouchEvent(true);
-                    float density=getResources().getDisplayMetrics().density;
                     float columnPx=(getWidth()-68*density)/6f;
                     float max=Math.max(0,hourTimes.length-6);
-                    hourPosition=Math.max(0,Math.min(max,touchStartHourPosition-dx/columnPx));
+                    float hourDelta=Math.max(-1f,Math.min(1f,-dx/columnPx));
+                    hourPosition=Math.max(0,Math.min(max,touchStartHourPosition+hourDelta));
                     invalidate();return true;
                 }
             }
             if(event.getAction()==MotionEvent.ACTION_UP){
                 getParent().requestDisallowInterceptTouchEvent(false);
-                int activate=pressedCard==card?card:0;pressedCard=0;invalidate();
+                int activate=pressedCard==2&&draggingHours?2:(pressedCard==card?card:0);
+                pressedCard=0;invalidate();
                 if(activate==1){super.performClick();mapAction.run();}
                 if(activate==2){
                     float dx=event.getX()-touchDownX;
                     if(draggingHours&&hourTimes!=null){
-                        float density=getResources().getDisplayMetrics().density;
-                        float columnPx=(getWidth()-68*density)/6f;
-                        int target=Math.abs(dx)>columnPx*.18f?hourOffset+(dx<0?1:-1):hourOffset;
+                        int target=Math.abs(dx)>12*density?hourOffset+(dx<0?1:-1):hourOffset;
                         animateToHour(target);
-                    }else{super.performClick();weatherAction.run();}
+                    }else animateToHour(hourOffset);
                     draggingHours=false;
                 }
+                if(activate==4){super.performClick();weatherAction.run();}
                 if(activate==3){super.performClick();fishingAction.run();}
                 return true;
             }
@@ -408,15 +414,19 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
             return true;
         }
         void animateToHour(int target){
+            if(hourTimes==null)return;
             int maxOffset=Math.max(0,hourTimes.length-6);
             int next=Math.max(0,Math.min(maxOffset,target));
             if(hourAnimator!=null)hourAnimator.cancel();
+            boolean changed=next!=hourOffset;
             hourOffset=next;
             hourAnimator=ValueAnimator.ofFloat(hourPosition,next);
-            hourAnimator.setDuration(560);
-            hourAnimator.setInterpolator(new DecelerateInterpolator(1.7f));
+            float distance=Math.min(1f,Math.abs(hourPosition-next));
+            hourAnimator.setDuration((long)(170+220*distance));
+            hourAnimator.setInterpolator(new PathInterpolator(.2f,0f,0f,1f));
             hourAnimator.addUpdateListener(a->{hourPosition=(float)a.getAnimatedValue();invalidate();});
             hourAnimator.start();
+            if(changed)performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK);
         }
         @Override public boolean performClick(){super.performClick();return true;}
         String vector(int t,String unit){float[]v=values.get(t);return v==null?"計測中…":String.format(Locale.JAPAN,"X %.1f\nY %.1f  Z %.1f %s",v[0],v[1],v[2],unit);}
