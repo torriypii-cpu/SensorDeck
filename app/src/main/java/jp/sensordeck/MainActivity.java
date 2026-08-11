@@ -424,7 +424,6 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
                         velocityTracker.computeCurrentVelocity(1000,maximumFlingVelocity);
                         float fingerVelocity=velocityTracker.getXVelocity();
                         if(Math.abs(fingerVelocity)>=minimumFlingVelocity){
-                            float density=getResources().getDisplayMetrics().density;
                             float columnPx=(getWidth()-68*density)/6f;
                             int flingVelocity=(int)Math.max(-12000,Math.min(12000,-fingerVelocity/columnPx*1000));
                             hourScroller.fling((int)(hourPosition*1000),0,flingVelocity,0,
