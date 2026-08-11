@@ -1,6 +1,6 @@
 # Sensor Deck for Galaxy S25
 
-Galaxy S25本体の物理センサーを、広告なし・通信なしでリアルタイム表示するAndroidアプリです。
+Galaxy S25本体の物理センサーを、広告なしでリアルタイム表示するAndroidアプリです。
 
 ## 表示項目
 
