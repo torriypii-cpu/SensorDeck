@@ -173,6 +173,14 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
                     dashboard.todayMin=(float)min.optDouble(0,Float.NaN);
                     dashboard.hourTimes=nextTimes;dashboard.hourTemps=nextTemps;
                     dashboard.hourCodes=nextCodes;dashboard.hourRain=nextRain;
+                    getSharedPreferences("weather_widget",MODE_PRIVATE).edit()
+                            .putString("place",finalPlace)
+                            .putString("condition",weatherName(current.optInt("weather_code",0)))
+                            .putFloat("temp",(float)current.optDouble("temperature_2m",Float.NaN))
+                            .putFloat("max",(float)max.optDouble(0,Float.NaN))
+                            .putFloat("min",(float)min.optDouble(0,Float.NaN))
+                            .putLong("updated",System.currentTimeMillis()).apply();
+                    WeatherWidgetProvider.updateAll(this);
                     dashboard.invalidate();
                 });
             } catch (Exception e) {
@@ -187,6 +195,16 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
     }
 
     private void openWeatherNews() {
+        if (lastWeatherLocation != null) {
+            double lat=lastWeatherLocation.getLatitude(),lon=lastWeatherLocation.getLongitude();
+            Intent locationIntent=new Intent(Intent.ACTION_VIEW,Uri.parse(String.format(
+                    Locale.US,"geo:%.6f,%.6f?q=%.6f,%.6f",lat,lon,lat,lon)));
+            locationIntent.setPackage("wni.WeathernewsTouch.jp");
+            try {
+                startActivity(locationIntent);
+                return;
+            } catch (Exception ignored) {}
+        }
         Intent app = getPackageManager().getLaunchIntentForPackage("wni.WeathernewsTouch.jp");
         if (app != null) {
             app.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);

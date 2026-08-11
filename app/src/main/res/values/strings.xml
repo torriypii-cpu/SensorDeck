@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">Sensor Deck</string>
+    <string name="widget_description">現在地の気温と天気を表示</string>
+</resources>
