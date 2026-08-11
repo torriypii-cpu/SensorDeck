@@ -29,6 +29,7 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
     private LocationManager locationManager;
     private Location lastWeatherLocation;
     private long lastWeatherFetch;
+    private String weatherNewsUrl = "https://weathernews.jp/";
     private final float[] accel = new float[3], magnetic = new float[3];
 
     @Override public void onCreate(Bundle state) {
@@ -163,7 +164,33 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
                     }
                 } catch (Exception ignored) {}
                 String finalPlace=place;
+                String localWeatherNewsUrl="https://weathernews.jp/";
+                HttpURLConnection addressConnection=null;
+                try {
+                    String addressEndpoint=String.format(Locale.US,
+                            "https://mreversegeocoder.gsi.go.jp/reverse-geocoder/LonLatToAddress"
+                            + "?lat=%.6f&lon=%.6f",lat,lon);
+                    addressConnection=(HttpURLConnection)new URL(addressEndpoint).openConnection();
+                    addressConnection.setConnectTimeout(8000);
+                    addressConnection.setReadTimeout(8000);
+                    StringBuilder addressBody=new StringBuilder();
+                    try(BufferedReader reader=new BufferedReader(
+                            new InputStreamReader(addressConnection.getInputStream()))){
+                        String line;while((line=reader.readLine())!=null)addressBody.append(line);
+                    }
+                    String municipality=new JSONObject(addressBody.toString())
+                            .getJSONObject("results").getString("muniCd");
+                    int prefecture=Integer.parseInt(municipality.substring(0,2));
+                    String slug=prefectureSlug(prefecture);
+                    if(slug!=null) localWeatherNewsUrl="https://weathernews.jp/onebox/tenki/"
+                            +slug+"/"+municipality+"/";
+                } catch(Exception ignored) {
+                } finally {
+                    if(addressConnection!=null)addressConnection.disconnect();
+                }
+                String finalWeatherNewsUrl=localWeatherNewsUrl;
                 runOnUiThread(() -> {
+                    weatherNewsUrl=finalWeatherNewsUrl;
                     dashboard.weather=result;dashboard.placeName=finalPlace;
                     dashboard.currentTemp=(float)current.optDouble("temperature_2m",Float.NaN);
                     dashboard.apparentTemp=(float)current.optDouble("apparent_temperature",Float.NaN);
@@ -195,24 +222,18 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
     }
 
     private void openWeatherNews() {
-        if (lastWeatherLocation != null) {
-            double lat=lastWeatherLocation.getLatitude(),lon=lastWeatherLocation.getLongitude();
-            Intent locationIntent=new Intent(Intent.ACTION_VIEW,Uri.parse(String.format(
-                    Locale.US,"geo:%.6f,%.6f?q=%.6f,%.6f",lat,lon,lat,lon)));
-            locationIntent.setPackage("wni.WeathernewsTouch.jp");
-            try {
-                startActivity(locationIntent);
-                return;
-            } catch (Exception ignored) {}
-        }
-        Intent app = getPackageManager().getLaunchIntentForPackage("wni.WeathernewsTouch.jp");
-        if (app != null) {
-            app.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-            startActivity(app);
-        } else {
-            startActivity(new Intent(Intent.ACTION_VIEW,
-                    Uri.parse("https://weathernews.jp/")));
-        }
+        startActivity(new Intent(Intent.ACTION_VIEW,Uri.parse(weatherNewsUrl)));
+    }
+
+    private static String prefectureSlug(int code) {
+        String[] slugs={null,"hokkaido","aomori","iwate","miyagi","akita","yamagata",
+                "fukushima","ibaraki","tochigi","gunma","saitama","chiba","tokyo",
+                "kanagawa","niigata","toyama","ishikawa","fukui","yamanashi","nagano",
+                "gifu","shizuoka","aichi","mie","shiga","kyoto","osaka","hyogo","nara",
+                "wakayama","tottori","shimane","okayama","hiroshima","yamaguchi",
+                "tokushima","kagawa","ehime","kochi","fukuoka","saga","nagasaki",
+                "kumamoto","oita","miyazaki","kagoshima","okinawa"};
+        return code>=1&&code<slugs.length?slugs[code]:null;
     }
 
     private static String weatherName(int code) {
