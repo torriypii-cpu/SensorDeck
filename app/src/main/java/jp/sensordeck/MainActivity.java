@@ -449,7 +449,7 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
                     String.format(Locale.JAPAN,"最高 %.0f°  最低 %.0f°   体感 %.0f°",todayMax,todayMin,apparentTemp);
             text(c,range,28,207,15,Color.argb(225,255,255,255),true);
 
-            p.setColor(pressedCard==2?Color.argb(130,255,255,255):Color.argb(76,8,25,55));
+            p.setColor(pressedCard==2?Color.argb(118,10,42,76):Color.argb(76,8,25,55));
             c.drawRoundRect(18,234,w-18,494,26,26,p);
             text(c,"時間ごとの天気",34,267,14,white,true);
             text(c,"指でスライド",w-116,267,11,Color.argb(190,255,255,255),false);
