@@ -40,7 +40,8 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
         dashboard = new Dashboard(this,
                 () -> startActivity(new Intent(this, MapActivity.class)),
                 this::openWeatherNews,
-                () -> startActivity(new Intent(this, FishingActivity.class)));
+                () -> startActivity(new Intent(this, FishingActivity.class)),
+                () -> startActivity(new Intent(this, SignalFinderActivity.class)));
         ScrollView scroll = new ScrollView(this);
         scroll.setFillViewport(true);
         scroll.setClipToPadding(false);
@@ -49,7 +50,7 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
         content.setOrientation(LinearLayout.VERTICAL);
         content.setPadding(0, 0, 0, (int)(32 * density));
         content.addView(dashboard, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, (int)(1640 * density)));
+                ViewGroup.LayoutParams.MATCH_PARENT, (int)(1760 * density)));
         scroll.addView(content, new ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         setContentView(scroll);
@@ -278,7 +279,7 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
         float currentTemp=Float.NaN,apparentTemp=Float.NaN,todayMax=Float.NaN,todayMin=Float.NaN;
         int currentCode; boolean isDay=true;
         String[] hourTimes; float[] hourTemps; int[] hourCodes,hourRain;
-        final Runnable mapAction, weatherAction, fishingAction; int pressedCard,hourOffset;
+        final Runnable mapAction, weatherAction, fishingAction, signalAction; int pressedCard,hourOffset;
         float hourPosition,touchStartHourPosition;
         boolean draggingHours,pendingSensorRedraw;
         final OverScroller hourScroller;
@@ -286,9 +287,9 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
         VelocityTracker velocityTracker;
         float touchDownX,touchDownY;
         final int bg=Color.rgb(7,17,31), card=Color.rgb(16,31,48), mint=Color.rgb(0,212,170), white=Color.rgb(238,246,252), muted=Color.rgb(143,163,180);
-        Dashboard(Context c,Runnable mapAction,Runnable weatherAction,Runnable fishingAction){
+        Dashboard(Context c,Runnable mapAction,Runnable weatherAction,Runnable fishingAction,Runnable signalAction){
             super(c);this.mapAction=mapAction;this.weatherAction=weatherAction;
-            this.fishingAction=fishingAction;
+            this.fishingAction=fishingAction;this.signalAction=signalAction;
             p.setTypeface(normalTypeface);
             hourScroller=new OverScroller(c);
             hourScroller.setFriction(ViewConfiguration.getScrollFriction()*1.35f);
@@ -321,6 +322,7 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
             String gps=location==null?"測位中…":String.format(Locale.JAPAN,"%.5f, %.5f\n高度 %.0fm  速度 %.1fkm/h",location.getLatitude(),location.getLongitude(),location.getAltitude(),location.getSpeed()*3.6);
             gpsBox(c,pad,y,w-pad,y+128);text(c,"GPS / QZSS  •  タップで地図",pad+16,y+28,13,mint,false);multi(c,gps,pad+16,y+58,16,white);y+=144;
             fishingBox(c,pad,y,w-pad,y+88);text(c,"釣りモード  •  タップで開く",pad+16,y+30,13,mint,false);text(c,"波・風・海水温・潮の満ち引き",pad+16,y+62,16,white,true);y+=104;
+            signalBox(c,pad,y,w-pad,y+88);text(c,"電波ファインダー  •  タップで開く",pad+16,y+30,13,mint,false);text(c,"Bluetooth・Wi-Fiから物を探す",pad+16,y+62,16,white,true);y+=104;
             box(c,pad,y,w-pad,y+82);text(c,"本体非搭載",pad+16,y+28,13,muted,false);text(c,"温度・湿度・心拍・水深",pad+16,y+58,15,white,false);c.restore();
         }
         void weatherHero(Canvas c,float w){
@@ -386,7 +388,8 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
             float density=getResources().getDisplayMetrics().density;
             float x=event.getX()/density,y=event.getY()/density,w=getWidth()/density;
             boolean detailButton=y>=260&&y<=316&&x>=w-184;
-            int card=y>=1218&&y<=1346?1:(y>=260&&y<=520?(detailButton?4:2):(y>=1362&&y<=1450?3:0));
+            int card=y>=1218&&y<=1346?1:(y>=260&&y<=520?(detailButton?4:2):
+                    (y>=1362&&y<=1450?3:(y>=1466&&y<=1554?5:0)));
             if(event.getAction()==MotionEvent.ACTION_DOWN&&card>0){
                 pressedCard=card;touchDownX=event.getX();touchDownY=event.getY();
                 if(card==2){
@@ -434,6 +437,7 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
                 }
                 if(activate==4){super.performClick();weatherAction.run();}
                 if(activate==3){super.performClick();fishingAction.run();}
+                if(activate==5){super.performClick();signalAction.run();}
                 recycleVelocityTracker();
                 flushPendingSensors();
                 return true;
@@ -487,6 +491,7 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
         void gpsBox(Canvas c,float l,float t,float r,float b){p.setColor(pressedCard==1?Color.rgb(24,61,78):card);c.drawRoundRect(l,t,r,b,22,22,p);}
         void weatherBox(Canvas c,float l,float t,float r,float b){p.setColor(pressedCard==2?Color.rgb(24,61,78):card);c.drawRoundRect(l,t,r,b,22,22,p);}
         void fishingBox(Canvas c,float l,float t,float r,float b){p.setColor(pressedCard==3?Color.rgb(24,61,78):card);c.drawRoundRect(l,t,r,b,22,22,p);}
+        void signalBox(Canvas c,float l,float t,float r,float b){p.setColor(pressedCard==5?Color.rgb(24,61,78):card);c.drawRoundRect(l,t,r,b,22,22,p);}
         void text(Canvas c,String s,float x,float y,float size,int color,boolean bold){p.setTextSize(size);p.setColor(color);p.setTypeface(bold?boldTypeface:normalTypeface);c.drawText(s,x,y,p);}
         void multi(Canvas c,String s,float x,float y,float size,int color){for(String line:s.split("\n")){text(c,line,x,y,size,color,false);y+=22;}}
         void graph(Canvas c,float l,float t,float r,float b){if(history.size()<2)return;float min=Float.MAX_VALUE,max=-Float.MAX_VALUE;for(float v:history){min=Math.min(min,v);max=Math.max(max,v);}if(max-min<.2f){max+=.1f;min-=.1f;}Path path=new Path();int i=0,n=history.size();for(float v:history){float x=l+(r-l)*i/(n-1),y=b-(v-min)/(max-min)*(b-t);if(i++==0)path.moveTo(x,y);else path.lineTo(x,y);}p.setStyle(Paint.Style.STROKE);p.setStrokeWidth(4);p.setColor(mint);c.drawPath(path,p);p.setStyle(Paint.Style.FILL);}
