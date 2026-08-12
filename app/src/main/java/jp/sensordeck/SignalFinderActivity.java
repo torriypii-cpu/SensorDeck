@@ -22,11 +22,13 @@ import android.hardware.Sensor;
 import android.hardware.SensorEvent;
 import android.hardware.SensorEventListener;
 import android.hardware.SensorManager;
+import android.net.wifi.WifiInfo;
 import android.net.wifi.WifiManager;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
@@ -41,7 +43,6 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
-import java.util.Locale;
 
 public class SignalFinderActivity extends Activity implements SensorEventListener {
     private static final int REQUEST_RADIO_PERMISSIONS=40;
@@ -50,7 +51,10 @@ public class SignalFinderActivity extends Activity implements SensorEventListene
     private final int mint=Color.rgb(0,212,170),white=Color.rgb(238,246,252),muted=Color.rgb(143,163,180);
     private final Handler handler=new Handler(Looper.getMainLooper());
     private final HashMap<String,RadioItem> items=new HashMap<>();
+    private final long[] headingTimes=new long[2048];
+    private final float[] headingValues=new float[2048];
     private int mode=MODE_BLUETOOTH;
+    private int headingWriteIndex,headingHistorySize;
     private String selectedKey;
     private float heading;
     private LinearLayout list;
@@ -84,6 +88,21 @@ public class SignalFinderActivity extends Activity implements SensorEventListene
         }
     };
 
+    private final Runnable connectedWifiSampleTask=new Runnable(){
+        @Override public void run(){
+            if(mode!=MODE_WIFI||selectedKey==null||!hasPermissions())return;
+            try{
+                WifiInfo info=wifiManager.getConnectionInfo();
+                RadioItem selected=items.get(selectedKey);String bssid=info==null?null:info.getBSSID();
+                if(selected!=null&&selectedKey.equalsIgnoreCase(bssid)){
+                    updateItem(new RadioItem(selected.key,selected.name,info.getRssi(),selected.type,SystemClock.elapsedRealtimeNanos()));
+                    status.setText(selected.name+" を高精度追跡中 • 同じ場所で水平に持って一周");
+                }
+            }catch(SecurityException ignored){}
+            handler.postDelayed(this,700);
+        }
+    };
+
     @Override public void onCreate(Bundle state){
         super.onCreate(state);
         sensorManager=(SensorManager)getSystemService(SENSOR_SERVICE);
@@ -105,7 +124,7 @@ public class SignalFinderActivity extends Activity implements SensorEventListene
         back.setTextSize(14);back.setGravity(Gravity.CENTER_VERTICAL);back.setBackground(panel(card,18));
         back.setOnClickListener(v->finish());root.addView(back,new LinearLayout.LayoutParams(-1,(int)(48*d)));
         TextView title=text("電波ファインダー",30,white,true);title.setPadding(2,(int)(22*d),0,0);root.addView(title);
-        TextView note=text("Bluetooth / Wi-Fiの強さを測定\n矢印は端末を回して測った『推定方向』です",14,muted,false);
+        TextView note=text("Bluetooth / Wi-Fiの強さを測定\n同じ場所で水平に持ち、ゆっくり一周すると精度が上がります",14,muted,false);
         note.setPadding(2,(int)(8*d),0,(int)(16*d));root.addView(note);
 
         LinearLayout tabs=new LinearLayout(this);tabs.setOrientation(LinearLayout.HORIZONTAL);
@@ -118,6 +137,10 @@ public class SignalFinderActivity extends Activity implements SensorEventListene
 
         status=text("権限を確認しています…",13,muted,false);status.setPadding(2,(int)(14*d),0,(int)(10*d));root.addView(status);
         finder=new FinderView(this);root.addView(finder,new LinearLayout.LayoutParams(-1,(int)(300*d)));
+        Button reset=new Button(this);reset.setText("↻ 方向測定をやり直す");reset.setAllCaps(false);reset.setTextColor(white);
+        reset.setTextSize(14);reset.setBackground(panel(card,18));
+        reset.setOnClickListener(v->{finder.resetMeasurements();if(selectedKey!=null)status.setText("測定をリセットしました • 同じ場所で水平に持って一周してください");});
+        LinearLayout.LayoutParams resetParams=new LinearLayout.LayoutParams(-1,(int)(48*d));resetParams.topMargin=(int)(10*d);root.addView(reset,resetParams);
         TextView choose=text("検出した電波（強い順）",16,white,true);choose.setPadding(2,(int)(18*d),0,(int)(10*d));root.addView(choose);
         list=new LinearLayout(this);list.setOrientation(LinearLayout.VERTICAL);root.addView(list);
         renderList();scroll.addView(root,new ViewGroup.LayoutParams(-1,-2));setContentView(scroll);
@@ -141,7 +164,10 @@ public class SignalFinderActivity extends Activity implements SensorEventListene
         if(!hasPermissions()){requestRadioPermissions();return;}
         stopScans();
         if(mode==MODE_BLUETOOTH)startBluetooth();
-        else{status.setText("Wi-Fiを検索中（更新は約10秒ごと）");wifiScanTask.run();}
+        else{
+            status.setText("Wi-Fiを検索中（更新は約10秒ごと）");wifiScanTask.run();
+            if(selectedKey!=null)connectedWifiSampleTask.run();
+        }
     }
 
     private void startBluetooth(){
@@ -164,7 +190,7 @@ public class SignalFinderActivity extends Activity implements SensorEventListene
         try{name=result.getDevice().getName();}catch(SecurityException ignored){}
         if((name==null||name.trim().isEmpty())&&result.getScanRecord()!=null)name=result.getScanRecord().getDeviceName();
         if(name==null||name.trim().isEmpty())name="名前なしのBluetooth機器";
-        updateItem(new RadioItem(key,name,result.getRssi(),"Bluetooth"));
+        updateItem(new RadioItem(key,name,result.getRssi(),"Bluetooth",result.getTimestampNanos()));
     }
 
     private void scanWifi(){
@@ -181,29 +207,35 @@ public class SignalFinderActivity extends Activity implements SensorEventListene
             for(android.net.wifi.ScanResult result:results){
                 String name=result.SSID;
                 if(name==null||name.trim().isEmpty())name="非公開Wi-Fi";
-                updateItem(new RadioItem(result.BSSID,name,result.level,"Wi-Fi"));
+                updateItem(new RadioItem(result.BSSID,name,result.level,"Wi-Fi",result.timestamp*1000L));
             }
-            status.setText("Wi-Fiを検索中 • アクセスポイントをタップして追跡");
+            if(selectedKey==null)status.setText("Wi-Fiを検索中 • アクセスポイントをタップして追跡");
         }catch(SecurityException e){status.setText("Wi-Fiと位置情報の権限が必要です");}
     }
 
-    private void updateItem(RadioItem item){
-        items.put(item.key,item);
-        if(item.key.equals(selectedKey))finder.updateSignal(item.rssi,heading);
+    private void updateItem(RadioItem measurement){
+        RadioItem item=items.get(measurement.key);
+        boolean freshMeasurement=item==null||measurement.measuredAtNanos>item.measuredAtNanos;
+        if(item==null){item=measurement;items.put(item.key,item);}
+        else if(freshMeasurement)item.addMeasurement(measurement.rssi,measurement.measuredAtNanos);
+        if(freshMeasurement&&item.key.equals(selectedKey)){
+            finder.updateSignal(measurement.rssi,headingAt(measurement.measuredAtNanos),measurement.measuredAtNanos);
+        }
         if(!renderPending){renderPending=true;handler.postDelayed(()->{renderPending=false;renderList();},450);}
     }
 
     private void renderList(){
         if(list==null)return;list.removeAllViews();float d=getResources().getDisplayMetrics().density;
         ArrayList<RadioItem> sorted=new ArrayList<>(items.values());
-        Collections.sort(sorted,Comparator.comparingInt((RadioItem item)->item.rssi).reversed());
+        Collections.sort(sorted,Comparator.comparingDouble((RadioItem item)->item.filteredRssi).reversed());
         if(sorted.isEmpty()){
             TextView empty=text(mode==MODE_BLUETOOTH?"まだ見つかっていません\n対象機器の電源・探索モードを確認してください":"まだWi-Fiが見つかっていません",14,muted,false);
             empty.setPadding((int)(16*d),(int)(18*d),(int)(16*d),(int)(18*d));empty.setBackground(panel(card,18));list.addView(empty);return;
         }
         int count=Math.min(30,sorted.size());
         for(int i=0;i<count;i++){
-            RadioItem item=sorted.get(i);TextView row=text(item.name+"\n"+strength(item.rssi)+"   "+item.rssi+" dBm",15,white,i==0);
+            RadioItem item=sorted.get(i);int shownRssi=Math.round(item.filteredRssi);
+            TextView row=text(item.name+"\n"+strength(shownRssi)+"   "+shownRssi+" dBm",15,white,i==0);
             row.setPadding((int)(16*d),(int)(13*d),(int)(16*d),(int)(13*d));
             row.setBackground(panel(item.key.equals(selectedKey)?Color.rgb(24,68,73):card,18));
             row.setOnClickListener(v->selectItem(item));
@@ -212,8 +244,9 @@ public class SignalFinderActivity extends Activity implements SensorEventListene
     }
 
     private void selectItem(RadioItem item){
-        selectedKey=item.key;finder.setTarget(item.name,item.type);finder.updateSignal(item.rssi,heading);
-        status.setText(item.name+" を追跡中 • スマホをゆっくり一周回してください");renderList();
+        selectedKey=item.key;finder.setTarget(item.name,item.type);finder.setCurrentSignal(Math.round(item.filteredRssi));
+        status.setText(item.name+" を追跡中 • 同じ場所で水平に持ってゆっくり一周");
+        handler.removeCallbacks(connectedWifiSampleTask);if(mode==MODE_WIFI)connectedWifiSampleTask.run();renderList();
     }
 
     private static String strength(int rssi){
@@ -253,7 +286,7 @@ public class SignalFinderActivity extends Activity implements SensorEventListene
     }
 
     private void stopScans(){
-        handler.removeCallbacks(wifiScanTask);
+        handler.removeCallbacks(wifiScanTask);handler.removeCallbacks(connectedWifiSampleTask);
         if(bluetoothScanner!=null){try{bluetoothScanner.stopScan(bluetoothCallback);}catch(SecurityException ignored){}bluetoothScanner=null;}
     }
 
@@ -261,7 +294,21 @@ public class SignalFinderActivity extends Activity implements SensorEventListene
         if(event.sensor.getType()!=Sensor.TYPE_ROTATION_VECTOR)return;
         float[] matrix=new float[9],orientation=new float[3];
         SensorManager.getRotationMatrixFromVector(matrix,event.values);SensorManager.getOrientation(matrix,orientation);
-        heading=(float)((Math.toDegrees(orientation[0])+360)%360);finder.updateHeading(heading);
+        heading=(float)((Math.toDegrees(orientation[0])+360)%360);
+        headingTimes[headingWriteIndex]=event.timestamp;headingValues[headingWriteIndex]=heading;
+        headingWriteIndex=(headingWriteIndex+1)%headingTimes.length;
+        if(headingHistorySize<headingTimes.length)headingHistorySize++;
+        finder.updateHeading(heading);
+    }
+
+    private float headingAt(long measuredAtNanos){
+        if(measuredAtNanos<=0||headingHistorySize==0)return heading;
+        long bestDifference=Long.MAX_VALUE;float bestHeading=heading;
+        for(int i=0;i<headingHistorySize;i++){
+            long difference=Math.abs(headingTimes[i]-measuredAtNanos);
+            if(difference<bestDifference){bestDifference=difference;bestHeading=headingValues[i];}
+        }
+        return bestHeading;
     }
 
     @Override public void onAccuracyChanged(Sensor sensor,int accuracy){}
@@ -276,23 +323,47 @@ public class SignalFinderActivity extends Activity implements SensorEventListene
     }
 
     private static class RadioItem{
-        final String key,name,type;final int rssi;
-        RadioItem(String key,String name,int rssi,String type){this.key=key;this.name=name;this.rssi=rssi;this.type=type;}
+        final String key,name,type;int rssi;float filteredRssi;long measuredAtNanos;
+        RadioItem(String key,String name,int rssi,String type,long measuredAtNanos){
+            this.key=key;this.name=name;this.type=type;this.rssi=rssi;filteredRssi=rssi;this.measuredAtNanos=measuredAtNanos;
+        }
+        void addMeasurement(int value,long timestamp){
+            rssi=value;filteredRssi=filteredRssi*.72f+value*.28f;measuredAtNanos=timestamp;
+        }
     }
 
     private static class FinderView extends View{
-        final Paint paint=new Paint(3);final float[] sectors=new float[36];final boolean[] seen=new boolean[36];
+        static final int SECTOR_COUNT=24;
+        static final long MAX_SAMPLE_AGE_NANOS=90_000_000_000L;
+        final Paint paint=new Paint(3);final float[] sectors=new float[SECTOR_COUNT];
+        final int[] sampleCounts=new int[SECTOR_COUNT];final long[] lastSamples=new long[SECTOR_COUNT];
         final Typeface normalTypeface=Typeface.create("sans",Typeface.NORMAL),boldTypeface=Typeface.create("sans",Typeface.BOLD);
         final int card=Color.rgb(16,31,48),mint=Color.rgb(0,212,170),white=Color.rgb(238,246,252),muted=Color.rgb(143,163,180);
-        String target="対象を下の一覧から選択",type="";float heading;int rssi=-127,seenCount;
+        String target="対象を下の一覧から選択",type="";float heading;int rssi=-127;
+        boolean hasHeading;
         FinderView(Context context){super(context);Arrays.fill(sectors,-127);paint.setTypeface(normalTypeface);setBackgroundColor(Color.TRANSPARENT);}
-        void clearTarget(){target="対象を下の一覧から選択";type="";rssi=-127;seenCount=0;Arrays.fill(sectors,-127);Arrays.fill(seen,false);invalidate();}
-        void setTarget(String name,String type){target=name;this.type=type;rssi=-127;seenCount=0;Arrays.fill(sectors,-127);Arrays.fill(seen,false);invalidate();}
-        void updateHeading(float value){heading=value;postInvalidateOnAnimation();}
-        void updateSignal(int value,float direction){
-            rssi=value;int sector=Math.round(direction/10f)%36;
-            if(!seen[sector]){seen[sector]=true;seenCount++;sectors[sector]=value;}
-            else sectors[sector]=sectors[sector]*.72f+value*.28f;
+        void clearTarget(){target="対象を下の一覧から選択";type="";rssi=-127;resetMeasurements();}
+        void setTarget(String name,String type){target=name;this.type=type;rssi=-127;resetMeasurements();}
+        void setCurrentSignal(int value){rssi=value;invalidate();}
+        void resetMeasurements(){Arrays.fill(sectors,-127);Arrays.fill(sampleCounts,0);Arrays.fill(lastSamples,0);invalidate();}
+        void updateHeading(float value){
+            if(!hasHeading){heading=value;hasHeading=true;}
+            else heading=normalize(heading+shortestTurn(heading,value)*.22f);
+            postInvalidateOnAnimation();
+        }
+        void updateSignal(int value,float direction,long measuredAtNanos){
+            rssi=rssi<=-127?value:Math.round(rssi*.68f+value*.32f);
+            int sector=Math.round(normalize(direction)/(360f/SECTOR_COUNT))%SECTOR_COUNT;
+            int count=sampleCounts[sector];
+            if(count==0)sectors[sector]=value;
+            else{
+                float difference=value-sectors[sector];
+                float limited=Math.max(-10f,Math.min(10f,difference));
+                float alpha=count<3?.45f:.28f;
+                sectors[sector]+=limited*alpha;
+            }
+            sampleCounts[sector]=Math.min(30,count+1);
+            lastSamples[sector]=measuredAtNanos>0?measuredAtNanos:SystemClock.elapsedRealtimeNanos();
             postInvalidateOnAnimation();
         }
         @Override protected void onDraw(Canvas canvas){
@@ -301,14 +372,46 @@ public class SignalFinderActivity extends Activity implements SensorEventListene
             draw(canvas,target,18,30,31,white,true);draw(canvas,type.isEmpty()?"待機中":type+"を追跡中",13,30,54,mint,false);
             String reading=rssi<=-127?"-- dBm":rssi+" dBm  •  "+strength(rssi);draw(canvas,reading,15,30,82,white,true);
             paint.setStyle(Paint.Style.STROKE);paint.setStrokeWidth(2);paint.setColor(Color.rgb(49,78,98));canvas.drawCircle(cx,172,66,paint);canvas.drawCircle(cx,172,48,paint);paint.setStyle(Paint.Style.FILL);
-            int best=-1;float bestValue=-128;
-            for(int i=0;i<36;i++)if(seen[i]&&sectors[i]>bestValue){bestValue=sectors[i];best=i;}
-            float relative=best<0?0:((best*10-heading+540)%360)-180;
+            long now=SystemClock.elapsedRealtimeNanos();int seenCount=0,totalSamples=0;
+            float scoreSum=0;int scoreCount=0,best=-1;float bestScore=-128;
+            for(int i=0;i<SECTOR_COUNT;i++){
+                if(isFresh(i,now)){seenCount++;totalSamples+=sampleCounts[i];}
+                float score=smoothedScore(i,now);
+                if(score>-127){scoreSum+=score;scoreCount++;if(score>bestScore){bestScore=score;best=i;}}
+            }
+            float bestDirection=best<0?heading:refinedDirection(best,bestScore,now);
+            float relative=shortestTurn(heading,bestDirection);
             canvas.save();canvas.rotate(relative,cx,172);Path arrow=new Path();arrow.moveTo(cx,112);arrow.lineTo(cx-15,144);arrow.lineTo(cx-6,141);arrow.lineTo(cx-6,208);arrow.lineTo(cx+6,208);arrow.lineTo(cx+6,141);arrow.lineTo(cx+15,144);arrow.close();
-            paint.setColor(seenCount>=4?mint:muted);canvas.drawPath(arrow,paint);canvas.restore();
-            String guide=target.startsWith("対象を")?"一覧から探したい電波をタップ":(seenCount<4?"スマホをゆっくり一周回してください":"矢印の方向で電波が強くなりました");
-            draw(canvas,guide,13,30,260,seenCount>=4?mint:muted,true);canvas.restore();
+            float contrast=scoreCount==0?0:bestScore-scoreSum/scoreCount;
+            float confidence=Math.min(1f,seenCount/(SECTOR_COUNT*.7f))*.65f+Math.min(1f,contrast/7f)*.35f;
+            boolean ready=seenCount>=6&&totalSamples>=10;
+            paint.setColor(ready?mint:muted);canvas.drawPath(arrow,paint);canvas.restore();
+            String confidenceText=confidence>=.72f?"高":confidence>=.45f?"中":"低";
+            String guide=target.startsWith("対象を")?"一覧から探したい電波をタップ":
+                    (!ready?"測定 "+seenCount+"/"+SECTOR_COUNT+"方向 • ゆっくり一周":"推定精度 "+confidenceText+" • 矢印方向へ近づいて再測定");
+            draw(canvas,guide,13,30,260,ready?mint:muted,true);canvas.restore();
         }
+        boolean isFresh(int index,long now){return sampleCounts[index]>0&&now-lastSamples[index]<=MAX_SAMPLE_AGE_NANOS;}
+        float smoothedScore(int center,long now){
+            float total=0,weights=0;
+            for(int offset=-2;offset<=2;offset++){
+                int index=(center+offset+SECTOR_COUNT)%SECTOR_COUNT;if(!isFresh(index,now))continue;
+                float weight=offset==0?4f:Math.abs(offset)==1?2f:1f;
+                weight*=Math.min(1f,.35f+sampleCounts[index]*.22f);total+=sectors[index]*weight;weights+=weight;
+            }
+            return weights==0?-127:total/weights;
+        }
+        float refinedDirection(int best,float bestScore,long now){
+            double x=0,y=0;
+            for(int offset=-2;offset<=2;offset++){
+                int index=(best+offset+SECTOR_COUNT)%SECTOR_COUNT;if(!isFresh(index,now))continue;
+                float score=smoothedScore(index,now);double weight=Math.pow(10,(score-bestScore)/10.0);
+                double angle=Math.toRadians(index*(360.0/SECTOR_COUNT));x+=Math.cos(angle)*weight;y+=Math.sin(angle)*weight;
+            }
+            return normalize((float)Math.toDegrees(Math.atan2(y,x)));
+        }
+        static float normalize(float degrees){degrees%=360f;return degrees<0?degrees+360f:degrees;}
+        static float shortestTurn(float from,float to){return ((to-from+540f)%360f)-180f;}
         void draw(Canvas c,String text,float size,float x,float y,int color,boolean bold){paint.setTextSize(size);paint.setColor(color);paint.setTypeface(bold?boldTypeface:normalTypeface);c.drawText(text,x,y,paint);}
     }
 }
