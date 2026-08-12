@@ -31,7 +31,9 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
     private Dashboard dashboard;
     private LocationManager locationManager;
     private Location lastWeatherLocation;
+    private Location cachedWeatherLocation;
     private long lastWeatherFetch;
+    private boolean locationUpdatesActive;
     private String weatherNewsUrl = "https://weathernews.jp/";
     private final float[] accel = new float[3], magnetic = new float[3];
 
@@ -42,6 +44,7 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
                 this::openWeatherNews,
                 () -> startActivity(new Intent(this, FishingActivity.class)),
                 () -> startActivity(new Intent(this, SignalFinderActivity.class)));
+        restoreCachedWeather();
         ScrollView scroll = new ScrollView(this);
         scroll.setFillViewport(true);
         scroll.setClipToPadding(false);
@@ -71,8 +74,26 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
 
     private void startLocation() {
         locationManager = (LocationManager)getSystemService(LOCATION_SERVICE);
-        if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED)
-            locationManager.requestLocationUpdates(LocationManager.GPS_PROVIDER, 1000, 0, this);
+        if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) return;
+        if(locationUpdatesActive)return;
+        Location quickest=null;
+        try {
+            Location gps=locationManager.getLastKnownLocation(LocationManager.GPS_PROVIDER);
+            Location network=locationManager.getLastKnownLocation(LocationManager.NETWORK_PROVIDER);
+            quickest=newerLocation(gps,network);
+            if(quickest==null)quickest=cachedWeatherLocation;
+            if(quickest!=null){dashboard.location=quickest;dashboard.invalidateSensors();fetchWeather(quickest);}
+            if(locationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER))
+                locationManager.requestLocationUpdates(LocationManager.NETWORK_PROVIDER,1000,0,this);
+            if(locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER))
+                locationManager.requestLocationUpdates(LocationManager.GPS_PROVIDER,1000,0,this);
+            locationUpdatesActive=true;
+        } catch(SecurityException ignored) {locationUpdatesActive=false;}
+    }
+
+    private static Location newerLocation(Location first,Location second){
+        if(first==null)return second;if(second==null)return first;
+        return first.getTime()>=second.getTime()?first:second;
     }
 
     @Override public void onRequestPermissionsResult(int r, String[] p, int[] g) {
@@ -114,7 +135,7 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
                 String endpoint = String.format(Locale.US,
                         "https://api.open-meteo.com/v1/forecast?latitude=%.5f&longitude=%.5f"
                         + "&current=temperature_2m,apparent_temperature,weather_code,is_day"
-                        + "&hourly=temperature_2m,weather_code,precipitation_probability"
+                        + "&hourly=temperature_2m,apparent_temperature,weather_code,precipitation_probability"
                         + "&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max"
                         + "&timezone=auto&forecast_days=4", lat, lon);
                 connection = (HttpURLConnection)new URL(endpoint).openConnection();
@@ -126,7 +147,8 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
                     String line;
                     while ((line = reader.readLine()) != null) body.append(line);
                 }
-                JSONObject root = new JSONObject(body.toString());
+                String response=body.toString();
+                JSONObject root = new JSONObject(response);
                 JSONObject current = root.getJSONObject("current");
                 JSONObject daily = root.getJSONObject("daily");
                 JSONObject hourly = root.getJSONObject("hourly");
@@ -161,17 +183,16 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
                         min.getDouble(1), max.getDouble(1),
                         weatherName(codes.getInt(1)), rain.getInt(1));
                 runOnUiThread(() -> {
-                    dashboard.weather=result;
-                    dashboard.currentTemp=(float)current.optDouble("temperature_2m",Float.NaN);
-                    dashboard.apparentTemp=(float)current.optDouble("apparent_temperature",Float.NaN);
-                    dashboard.currentCode=current.optInt("weather_code",0);
-                    dashboard.isDay=current.optInt("is_day",1)==1;
-                    dashboard.todayMax=(float)max.optDouble(0,Float.NaN);
-                    dashboard.todayMin=(float)min.optDouble(0,Float.NaN);
-                    dashboard.hourTimes=nextTimes;dashboard.hourTemps=nextTemps;
-                    dashboard.hourCodes=nextCodes;dashboard.hourRain=nextRain;
-                    dashboard.hourScroller.forceFinished(true);
-                    dashboard.hourOffset=0;dashboard.hourPosition=0;
+                    applyWeather(result,(float)current.optDouble("temperature_2m",Float.NaN),
+                            (float)current.optDouble("apparent_temperature",Float.NaN),
+                            current.optInt("weather_code",0),current.optInt("is_day",1)==1,
+                            (float)max.optDouble(0,Float.NaN),(float)min.optDouble(0,Float.NaN),
+                            nextTimes,nextTemps,nextCodes,nextRain);
+                    getSharedPreferences("weather_cache",MODE_PRIVATE).edit()
+                            .putString("response",response).putLong("updated",System.currentTimeMillis())
+                            .putString("place",dashboard.placeName).putString("weather_news_url",weatherNewsUrl)
+                            .putLong("latitude",Double.doubleToRawLongBits(lat))
+                            .putLong("longitude",Double.doubleToRawLongBits(lon)).apply();
                     getSharedPreferences("weather_widget",MODE_PRIVATE).edit()
                             .putString("place",dashboard.placeName)
                             .putString("condition",weatherName(current.optInt("weather_code",0)))
@@ -191,6 +212,69 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
                 if (connection != null) connection.disconnect();
             }
         }).start();
+    }
+
+    private void restoreCachedWeather(){
+        android.content.SharedPreferences cache=getSharedPreferences("weather_cache",MODE_PRIVATE);
+        android.content.SharedPreferences widget=getSharedPreferences("weather_widget",MODE_PRIVATE);
+        String response=cache.getString("response",null);
+        dashboard.placeName=cache.getString("place",widget.getString("place","現在地を測位中"));
+        if(widget.contains("temp")){
+            dashboard.currentTemp=widget.getFloat("temp",Float.NaN);dashboard.todayMax=widget.getFloat("max",Float.NaN);
+            dashboard.todayMin=widget.getFloat("min",Float.NaN);dashboard.currentCode=weatherCode(widget.getString("condition",""));
+            Calendar now=Calendar.getInstance();dashboard.isDay=now.get(Calendar.HOUR_OF_DAY)>=6&&now.get(Calendar.HOUR_OF_DAY)<18;
+        }
+        weatherNewsUrl=cache.getString("weather_news_url",weatherNewsUrl);
+        long latBits=cache.getLong("latitude",Long.MIN_VALUE),lonBits=cache.getLong("longitude",Long.MIN_VALUE);
+        if(latBits!=Long.MIN_VALUE&&lonBits!=Long.MIN_VALUE){
+            cachedWeatherLocation=new Location("weather-cache");
+            cachedWeatherLocation.setLatitude(Double.longBitsToDouble(latBits));
+            cachedWeatherLocation.setLongitude(Double.longBitsToDouble(lonBits));
+            cachedWeatherLocation.setTime(cache.getLong("updated",0));
+        }
+        if(response==null||response.isEmpty())return;
+        try{
+            JSONObject root=new JSONObject(response),current=root.getJSONObject("current");
+            JSONObject daily=root.getJSONObject("daily"),hourly=root.getJSONObject("hourly");
+            JSONArray codes=daily.getJSONArray("weather_code"),max=daily.getJSONArray("temperature_2m_max");
+            JSONArray min=daily.getJSONArray("temperature_2m_min"),rain=daily.getJSONArray("precipitation_probability_max");
+            JSONArray times=hourly.getJSONArray("time"),hourlyTemps=hourly.getJSONArray("temperature_2m");
+            JSONArray hourlyApparent=hourly.optJSONArray("apparent_temperature");
+            JSONArray hourlyCodes=hourly.getJSONArray("weather_code"),hourlyRain=hourly.getJSONArray("precipitation_probability");
+            String currentTime=current.getString("time");int start=0;
+            while(start<times.length()-1&&times.getString(start).compareTo(currentTime)<0)start++;
+            long updated=cache.getLong("updated",System.currentTimeMillis());
+            int elapsedHours=(int)Math.max(0,(System.currentTimeMillis()-updated)/(60*60*1000L));
+            start=Math.min(times.length()-1,start+elapsedHours);
+            JSONArray dailyTimes=daily.getJSONArray("time");String targetDate=times.getString(start).substring(0,10);
+            int dayIndex=0;
+            while(dayIndex<dailyTimes.length()-1&&!dailyTimes.getString(dayIndex).equals(targetDate))dayIndex++;
+            int tomorrowIndex=Math.min(dayIndex+1,dailyTimes.length()-1);
+            int count=Math.min(72,times.length()-start);String[] nextTimes=new String[count];float[] nextTemps=new float[count];
+            int[] nextCodes=new int[count],nextRain=new int[count];
+            for(int i=0;i<count;i++){int index=start+i;nextTimes[i]=times.getString(index);
+                nextTemps[i]=(float)hourlyTemps.getDouble(index);nextCodes[i]=hourlyCodes.getInt(index);nextRain[i]=hourlyRain.getInt(index);}
+            String result=String.format(Locale.JAPAN,
+                    "現在 %.1f℃  %s\n今日 %.0f〜%.0f℃  降水%d%%\n明日 %.0f〜%.0f℃  %s  降水%d%%",
+                    hourlyTemps.getDouble(start),weatherName(hourlyCodes.getInt(start)),
+                    min.getDouble(dayIndex),max.getDouble(dayIndex),rain.getInt(dayIndex),
+                    min.getDouble(tomorrowIndex),max.getDouble(tomorrowIndex),
+                    weatherName(codes.getInt(tomorrowIndex)),rain.getInt(tomorrowIndex));
+            int localHour=Integer.parseInt(times.getString(start).substring(11,13));
+            applyWeather(result,(float)hourlyTemps.optDouble(start,Float.NaN),
+                    hourlyApparent==null?(float)current.optDouble("apparent_temperature",Float.NaN):
+                            (float)hourlyApparent.optDouble(start,Float.NaN),hourlyCodes.optInt(start,0),
+                    localHour>=6&&localHour<18,(float)max.optDouble(dayIndex,Float.NaN),(float)min.optDouble(dayIndex,Float.NaN),
+                    nextTimes,nextTemps,nextCodes,nextRain);
+        }catch(Exception ignored){}
+    }
+
+    private void applyWeather(String summary,float currentTemp,float apparentTemp,int currentCode,boolean isDay,
+                              float todayMax,float todayMin,String[] times,float[] temps,int[] codes,int[] rain){
+        dashboard.weather=summary;dashboard.currentTemp=currentTemp;dashboard.apparentTemp=apparentTemp;
+        dashboard.currentCode=currentCode;dashboard.isDay=isDay;dashboard.todayMax=todayMax;dashboard.todayMin=todayMin;
+        dashboard.hourTimes=times;dashboard.hourTemps=temps;dashboard.hourCodes=codes;dashboard.hourRain=rain;
+        dashboard.hourScroller.forceFinished(true);dashboard.hourOffset=0;dashboard.hourPosition=0;dashboard.invalidateWeather();
     }
 
     private void fetchPlaceAndWeatherNews(double lat,double lon) {
@@ -216,6 +300,8 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
                         "https://weathernews.jp/onebox/tenki/"+slug+"/"+municipality+"/";
                 runOnUiThread(() -> {
                     dashboard.placeName=place;weatherNewsUrl=url;dashboard.invalidateWeather();
+                    getSharedPreferences("weather_cache",MODE_PRIVATE).edit()
+                            .putString("place",place).putString("weather_news_url",url).apply();
                     getSharedPreferences("weather_widget",MODE_PRIVATE).edit()
                             .putString("place",place).apply();
                     WeatherWidgetProvider.updateAll(this);
@@ -253,10 +339,14 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
         if (code <= 86) return "にわか雪";
         return "雷雨";
     }
+    private static int weatherCode(String name){
+        if(name.contains("雷"))return 95;if(name.contains("雪"))return 71;if(name.contains("霧雨"))return 51;
+        if(name.contains("雨"))return 61;if(name.contains("霧"))return 45;if(name.contains("晴")||name.contains("曇"))return 2;return 0;
+    }
     @Override protected void onPause(){
         super.onPause();
         sensors.unregisterListener(this);
-        if(locationManager!=null) locationManager.removeUpdates(this);
+        if(locationManager!=null) locationManager.removeUpdates(this);locationUpdatesActive=false;
     }
     @Override protected void onResume(){
         super.onResume();
@@ -334,7 +424,8 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
             String temp=Float.isNaN(currentTemp)?"--°":String.format(Locale.JAPAN,"%.0f°",currentTemp);
             text(c,temp,24,150,72,white,false);
             text(c,weatherName(currentCode),28,196,25,white,true);
-            String range=Float.isNaN(todayMax)?"予報を取得中…":
+            String range=Float.isNaN(todayMax)?"予報を取得中…":Float.isNaN(apparentTemp)?
+                    String.format(Locale.JAPAN,"↑ %.0f° / ↓ %.0f°",todayMax,todayMin):
                     String.format(Locale.JAPAN,"↑ %.0f° / ↓ %.0f°    体感 %.0f°",todayMax,todayMin,apparentTemp);
             text(c,range,28,232,16,white,true);
             p.setColor(Color.argb(185,8,35,67));c.drawRoundRect(18,260,w-18,520,24,24,p);
