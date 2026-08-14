@@ -80,7 +80,8 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
                 () -> startActivity(new Intent(this, MapActivity.class)),
                 this::openWeatherNews,
                 () -> startActivity(new Intent(this, FishingActivity.class)),
-                () -> startActivity(new Intent(this, SignalFinderActivity.class)));
+                () -> startActivity(new Intent(this, SignalFinderActivity.class)),
+                this::showChargingMonitor);
         restoreCachedWeather();
         ScrollView scroll = new ScrollView(this);
         scroll.setFillViewport(true);
@@ -90,7 +91,7 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
         content.setOrientation(LinearLayout.VERTICAL);
         content.setPadding(0, 0, 0, (int)(32 * density));
         content.addView(dashboard, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, (int)(1980 * density)));
+                ViewGroup.LayoutParams.MATCH_PARENT, (int)(2080 * density)));
         scroll.addView(content, new ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         FrameLayout root=new FrameLayout(this);root.addView(scroll,new FrameLayout.LayoutParams(-1,-1));
@@ -136,12 +137,17 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
         if(!charging)filteredChargeCurrent=Float.NaN;
         String source=plugged==BatteryManager.BATTERY_PLUGGED_WIRELESS?"ワイヤレス充電":
                 plugged==BatteryManager.BATTERY_PLUGGED_USB?"USB充電":
-                plugged==BatteryManager.BATTERY_PLUGGED_AC?"有線充電":"充電中";
+                plugged==BatteryManager.BATTERY_PLUGGED_AC?"有線充電":"未接続";
         chargingOverlay.setChargingData(percent,current,voltage,source,charging);
         boolean first=!batteryInitialized,justConnected=charging&&!lastCharging;
         batteryInitialized=true;lastCharging=charging;
         if(charging&&(forceShow||first||justConnected))chargingOverlay.showFor(9000);
         else if(!charging)chargingOverlay.hide();
+    }
+
+    private void showChargingMonitor(){
+        Intent battery=registerReceiver(null,new IntentFilter(Intent.ACTION_BATTERY_CHANGED));
+        updateChargingData(battery,false);chargingOverlay.showFor(30_000);
     }
 
     private void register(int type) {
@@ -507,7 +513,10 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
             paint.setColor(Color.WHITE);canvas.drawCircle(cx+(float)Math.cos(dotAngle)*radius,cy+(float)Math.sin(dotAngle)*radius,5+pulse*2,paint);
             centered(canvas,percent+"%",cx,cy+18,44,Color.WHITE,true);
             centered(canvas,source,cx,cy+122,16,Color.rgb(127,241,211),true);
-            if(charging&&!Float.isNaN(currentAmps)&&!Float.isNaN(voltage)&&voltage>0){
+            if(!charging){
+                centered(canvas,"充電器を接続してください",cx,cy+168,22,Color.WHITE,true);
+                centered(canvas,"接続するとW・A・Vを表示します",cx,cy+199,15,Color.rgb(205,222,230),false);
+            }else if(!Float.isNaN(currentAmps)&&!Float.isNaN(voltage)&&voltage>0){
                 centered(canvas,String.format(Locale.JAPAN,"推定 %.1f W",currentAmps*voltage),cx,cy+168,28,Color.WHITE,true);
                 centered(canvas,String.format(Locale.JAPAN,"%.2f A   •   %.2f V",currentAmps,voltage),cx,cy+199,17,Color.rgb(205,222,230),false);
             }else{
@@ -536,7 +545,7 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
         float currentTemp=Float.NaN,apparentTemp=Float.NaN,todayMax=Float.NaN,todayMin=Float.NaN;
         int currentCode; boolean isDay=true;
         String[] hourTimes,dayTimes; float[] hourTemps,dayMax,dayMin; int[] hourCodes,hourRain,dayCodes,dayRain;
-        final Runnable mapAction, weatherAction, fishingAction, signalAction; int pressedCard,hourOffset;
+        final Runnable mapAction, weatherAction, fishingAction, signalAction,chargingAction; int pressedCard,hourOffset;
         float hourPosition,touchStartHourPosition;
         boolean draggingHours,pendingSensorRedraw;
         final OverScroller hourScroller;
@@ -544,9 +553,9 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
         VelocityTracker velocityTracker;
         float touchDownX,touchDownY;
         final int bg=Color.rgb(7,17,31), card=Color.rgb(16,31,48), mint=Color.rgb(0,212,170), white=Color.rgb(238,246,252), muted=Color.rgb(143,163,180);
-        Dashboard(Context c,Runnable mapAction,Runnable weatherAction,Runnable fishingAction,Runnable signalAction){
+        Dashboard(Context c,Runnable mapAction,Runnable weatherAction,Runnable fishingAction,Runnable signalAction,Runnable chargingAction){
             super(c);this.mapAction=mapAction;this.weatherAction=weatherAction;
-            this.fishingAction=fishingAction;this.signalAction=signalAction;
+            this.fishingAction=fishingAction;this.signalAction=signalAction;this.chargingAction=chargingAction;
             p.setTypeface(normalTypeface);
             hourScroller=new OverScroller(c);
             hourScroller.setFriction(ViewConfiguration.getScrollFriction()*1.35f);
@@ -580,6 +589,7 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
             gpsBox(c,pad,y,w-pad,y+128);text(c,"GPS / QZSS  •  タップで地図",pad+16,y+28,13,mint,false);multi(c,gps,pad+16,y+58,16,white);y+=144;
             fishingBox(c,pad,y,w-pad,y+88);text(c,"釣りモード  •  タップで開く",pad+16,y+30,13,mint,false);text(c,"波・風・海水温・潮の満ち引き",pad+16,y+62,16,white,true);y+=104;
             signalBox(c,pad,y,w-pad,y+88);text(c,"電波ファインダー  •  タップで開く",pad+16,y+30,13,mint,false);text(c,"Bluetooth・Wi-Fiから物を探す",pad+16,y+62,16,white,true);y+=104;
+            chargingBox(c,pad,y,w-pad,y+88);text(c,"充電モニター  •  タップで開く",pad+16,y+30,13,mint,false);text(c,"推定W・A・Vをリアルタイム表示",pad+16,y+62,16,white,true);y+=104;
             box(c,pad,y,w-pad,y+82);text(c,"本体非搭載",pad+16,y+28,13,muted,false);text(c,"温度・湿度・心拍・水深",pad+16,y+58,15,white,false);c.restore();
         }
         void weatherHero(Canvas c,float w){
@@ -702,7 +712,7 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
             float x=event.getX()/density,y=event.getY()/density,w=getWidth()/density;
             boolean detailButton=y>=20&&y<=62&&x>=w-122;
             int card=detailButton?4:(y>=1438&&y<=1566?1:(y>=234&&y<=494?2:
-                    (y>=1582&&y<=1670?3:(y>=1686&&y<=1774?5:0))));
+                    (y>=1582&&y<=1670?3:(y>=1686&&y<=1774?5:(y>=1790&&y<=1878?6:0)))));
             if(event.getAction()==MotionEvent.ACTION_DOWN&&card>0){
                 pressedCard=card;touchDownX=event.getX();touchDownY=event.getY();
                 if(card==2){
@@ -751,6 +761,7 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
                 if(activate==4){super.performClick();weatherAction.run();}
                 if(activate==3){super.performClick();fishingAction.run();}
                 if(activate==5){super.performClick();signalAction.run();}
+                if(activate==6){super.performClick();chargingAction.run();}
                 recycleVelocityTracker();
                 flushPendingSensors();
                 return true;
@@ -805,6 +816,7 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
         void weatherBox(Canvas c,float l,float t,float r,float b){p.setColor(pressedCard==2?Color.rgb(24,61,78):card);c.drawRoundRect(l,t,r,b,22,22,p);}
         void fishingBox(Canvas c,float l,float t,float r,float b){p.setColor(pressedCard==3?Color.rgb(24,61,78):card);c.drawRoundRect(l,t,r,b,22,22,p);}
         void signalBox(Canvas c,float l,float t,float r,float b){p.setColor(pressedCard==5?Color.rgb(24,61,78):card);c.drawRoundRect(l,t,r,b,22,22,p);}
+        void chargingBox(Canvas c,float l,float t,float r,float b){p.setColor(pressedCard==6?Color.rgb(24,61,78):card);c.drawRoundRect(l,t,r,b,22,22,p);}
         void text(Canvas c,String s,float x,float y,float size,int color,boolean bold){p.setTextSize(size);p.setColor(color);p.setTypeface(bold?boldTypeface:normalTypeface);c.drawText(s,x,y,p);}
         void multi(Canvas c,String s,float x,float y,float size,int color){for(String line:s.split("\n")){text(c,line,x,y,size,color,false);y+=22;}}
         void graph(Canvas c,float l,float t,float r,float b){if(history.size()<2)return;float min=Float.MAX_VALUE,max=-Float.MAX_VALUE;for(float v:history){min=Math.min(min,v);max=Math.max(max,v);}if(max-min<.2f){max+=.1f;min-=.1f;}Path path=new Path();int i=0,n=history.size();for(float v:history){float x=l+(r-l)*i/(n-1),y=b-(v-min)/(max-min)*(b-t);if(i++==0)path.moveTo(x,y);else path.lineTo(x,y);}p.setStyle(Paint.Style.STROKE);p.setStrokeWidth(4);p.setColor(mint);c.drawPath(path,p);p.setStyle(Paint.Style.FILL);}
