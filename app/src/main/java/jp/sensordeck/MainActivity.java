@@ -2,14 +2,20 @@ package jp.sensordeck;
 
 import android.Manifest;
 import android.app.Activity;
+import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.pm.PackageManager;
 import android.net.Uri;
 import android.graphics.*;
 import android.hardware.*;
 import android.location.*;
+import android.os.BatteryManager;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
+import android.os.SystemClock;
 import android.view.MotionEvent;
 import android.view.VelocityTracker;
 import android.view.View;
@@ -18,6 +24,7 @@ import android.view.ViewConfiguration;
 import android.widget.LinearLayout;
 import android.widget.OverScroller;
 import android.widget.ScrollView;
+import android.widget.FrameLayout;
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
@@ -36,6 +43,36 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
     private boolean locationUpdatesActive;
     private String weatherNewsUrl = "https://weathernews.jp/";
     private final float[] accel = new float[3], magnetic = new float[3];
+    private final Handler uiHandler=new Handler(Looper.getMainLooper());
+    private BatteryManager batteryManager;
+    private ChargingOverlay chargingOverlay;
+    private Intent lastBatteryIntent;
+    private boolean batteryReceiverRegistered,batteryInitialized,lastCharging;
+    private float filteredChargeCurrent=Float.NaN;
+
+    private final BroadcastReceiver batteryReceiver=new BroadcastReceiver(){
+        @Override public void onReceive(Context context,Intent intent){
+            String action=intent.getAction();
+            if(Intent.ACTION_POWER_DISCONNECTED.equals(action)){
+                lastCharging=false;filteredChargeCurrent=Float.NaN;
+                if(chargingOverlay!=null)chargingOverlay.hide();return;
+            }
+            boolean connected=Intent.ACTION_POWER_CONNECTED.equals(action);
+            Intent battery=Intent.ACTION_BATTERY_CHANGED.equals(action)?intent:
+                    registerReceiver(null,new IntentFilter(Intent.ACTION_BATTERY_CHANGED));
+            updateChargingData(battery,connected);
+        }
+    };
+
+    private final Runnable batteryPoll=new Runnable(){
+        @Override public void run(){
+            if(chargingOverlay!=null&&lastCharging){
+                Intent battery=registerReceiver(null,new IntentFilter(Intent.ACTION_BATTERY_CHANGED));
+                updateChargingData(battery,false);
+            }
+            uiHandler.postDelayed(this,750);
+        }
+    };
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
@@ -56,7 +93,15 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
                 ViewGroup.LayoutParams.MATCH_PARENT, (int)(1980 * density)));
         scroll.addView(content, new ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-        setContentView(scroll);
+        FrameLayout root=new FrameLayout(this);root.addView(scroll,new FrameLayout.LayoutParams(-1,-1));
+        chargingOverlay=new ChargingOverlay(this);root.addView(chargingOverlay,new FrameLayout.LayoutParams(-1,-1));
+        setContentView(root);
+        batteryManager=(BatteryManager)getSystemService(BATTERY_SERVICE);
+        IntentFilter batteryFilter=new IntentFilter(Intent.ACTION_BATTERY_CHANGED);
+        batteryFilter.addAction(Intent.ACTION_POWER_CONNECTED);batteryFilter.addAction(Intent.ACTION_POWER_DISCONNECTED);
+        if(android.os.Build.VERSION.SDK_INT>=33)registerReceiver(batteryReceiver,batteryFilter,Context.RECEIVER_NOT_EXPORTED);
+        else registerReceiver(batteryReceiver,batteryFilter);
+        batteryReceiverRegistered=true;
         sensors = (SensorManager)getSystemService(SENSOR_SERVICE);
         register(Sensor.TYPE_PRESSURE); register(Sensor.TYPE_ACCELEROMETER);
         register(Sensor.TYPE_GYROSCOPE); register(Sensor.TYPE_MAGNETIC_FIELD);
@@ -64,6 +109,39 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
         if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED)
             requestPermissions(new String[]{Manifest.permission.ACCESS_FINE_LOCATION}, 10);
         else startLocation();
+    }
+
+    private void updateChargingData(Intent battery,boolean forceShow){
+        if(battery==null||batteryManager==null||chargingOverlay==null)return;
+        lastBatteryIntent=battery;
+        int level=battery.getIntExtra(BatteryManager.EXTRA_LEVEL,0);
+        int scale=battery.getIntExtra(BatteryManager.EXTRA_SCALE,100);
+        int percent=scale>0?Math.max(0,Math.min(100,Math.round(level*100f/scale))):0;
+        int status=battery.getIntExtra(BatteryManager.EXTRA_STATUS,BatteryManager.BATTERY_STATUS_UNKNOWN);
+        int plugged=battery.getIntExtra(BatteryManager.EXTRA_PLUGGED,0);
+        boolean charging=plugged!=0&&(status==BatteryManager.BATTERY_STATUS_CHARGING||status==BatteryManager.BATTERY_STATUS_FULL);
+        float voltage=battery.getIntExtra(BatteryManager.EXTRA_VOLTAGE,0)/1000f;
+        if(voltage<2.5f||voltage>6f)voltage=Float.NaN;
+        int rawCurrent=batteryManager.getIntProperty(BatteryManager.BATTERY_PROPERTY_CURRENT_NOW);
+        if(rawCurrent==Integer.MIN_VALUE||Math.abs((long)rawCurrent)<10_000L)
+            rawCurrent=batteryManager.getIntProperty(BatteryManager.BATTERY_PROPERTY_CURRENT_AVERAGE);
+        float current=Float.NaN;
+        if(rawCurrent!=Integer.MIN_VALUE){
+            float measured=Math.abs(rawCurrent)/1_000_000f;
+            if(measured>=.01f&&measured<=15f){
+                filteredChargeCurrent=Float.isNaN(filteredChargeCurrent)?measured:filteredChargeCurrent*.66f+measured*.34f;
+                current=filteredChargeCurrent;
+            }
+        }
+        if(!charging)filteredChargeCurrent=Float.NaN;
+        String source=plugged==BatteryManager.BATTERY_PLUGGED_WIRELESS?"ワイヤレス充電":
+                plugged==BatteryManager.BATTERY_PLUGGED_USB?"USB充電":
+                plugged==BatteryManager.BATTERY_PLUGGED_AC?"有線充電":"充電中";
+        chargingOverlay.setChargingData(percent,current,voltage,source,charging);
+        boolean first=!batteryInitialized,justConnected=charging&&!lastCharging;
+        batteryInitialized=true;lastCharging=charging;
+        if(charging&&(forceShow||first||justConnected))chargingOverlay.showFor(9000);
+        else if(!charging)chargingOverlay.hide();
     }
 
     private void register(int type) {
@@ -361,16 +439,89 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
     }
     @Override protected void onPause(){
         super.onPause();
+        uiHandler.removeCallbacks(batteryPoll);
         sensors.unregisterListener(this);
         if(locationManager!=null) locationManager.removeUpdates(this);locationUpdatesActive=false;
     }
     @Override protected void onResume(){
         super.onResume();
+        uiHandler.removeCallbacks(batteryPoll);uiHandler.post(batteryPoll);
         if(sensors!=null){
             register(Sensor.TYPE_PRESSURE);register(Sensor.TYPE_ACCELEROMETER);
             register(Sensor.TYPE_GYROSCOPE);register(Sensor.TYPE_MAGNETIC_FIELD);
             register(Sensor.TYPE_LIGHT);register(Sensor.TYPE_PROXIMITY);
             if(checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION)==PackageManager.PERMISSION_GRANTED) startLocation();
+        }
+    }
+
+    @Override protected void onDestroy(){
+        uiHandler.removeCallbacks(batteryPoll);
+        if(batteryReceiverRegistered){unregisterReceiver(batteryReceiver);batteryReceiverRegistered=false;}
+        super.onDestroy();
+    }
+
+    @Override public void onBackPressed(){
+        if(chargingOverlay!=null&&chargingOverlay.getVisibility()==View.VISIBLE){chargingOverlay.hide();return;}
+        super.onBackPressed();
+    }
+
+    static class ChargingOverlay extends View {
+        final Paint paint=new Paint(3);
+        final Typeface normal=Typeface.create("sans",Typeface.NORMAL),bold=Typeface.create("sans",Typeface.BOLD);
+        final Runnable hideTask=this::hide;
+        int percent;float currentAmps=Float.NaN,voltage=Float.NaN;String source="充電中";
+        boolean charging;long shownAt;
+
+        ChargingOverlay(Context context){
+            super(context);setVisibility(GONE);setClickable(true);setOnClickListener(v->hide());
+            setContentDescription("充電電力表示。タップで閉じる");
+        }
+        void setChargingData(int percent,float current,float voltage,String source,boolean charging){
+            this.percent=percent;currentAmps=current;this.voltage=voltage;this.source=source;this.charging=charging;
+            if(getVisibility()==VISIBLE)postInvalidateOnAnimation();
+        }
+        void showFor(long duration){
+            removeCallbacks(hideTask);animate().cancel();setAlpha(1f);shownAt=SystemClock.elapsedRealtime();
+            setVisibility(VISIBLE);bringToFront();postDelayed(hideTask,duration);postInvalidateOnAnimation();
+        }
+        void hide(){
+            removeCallbacks(hideTask);if(getVisibility()!=VISIBLE)return;
+            animate().alpha(0f).setDuration(240).withEndAction(()->{setVisibility(GONE);setAlpha(1f);}).start();
+        }
+        @Override protected void onDraw(Canvas canvas){
+            super.onDraw(canvas);float d=getResources().getDisplayMetrics().density;
+            canvas.save();canvas.scale(d,d);float w=getWidth()/d,h=getHeight()/d,cx=w/2,cy=Math.min(330,h*.38f);
+            LinearGradient background=new LinearGradient(0,0,0,h,Color.rgb(2,8,18),Color.rgb(0,20,25),Shader.TileMode.CLAMP);
+            paint.setShader(background);canvas.drawRect(0,0,w,h,paint);paint.setShader(null);
+            long elapsed=SystemClock.elapsedRealtime()-shownAt;
+            float entrance=Math.min(1f,elapsed/950f);entrance=1-(1-entrance)*(1-entrance)*(1-entrance);
+            float pulse=(float)((Math.sin(elapsed/330.0)+1)/2.0),radius=78;
+            paint.setStyle(Paint.Style.STROKE);paint.setStrokeCap(Paint.Cap.ROUND);
+            for(int i=3;i>=1;i--){paint.setStrokeWidth(8+i*7);paint.setColor(Color.argb((int)(11+pulse*8),40,255,202));
+                canvas.drawCircle(cx,cy,radius+i*3,paint);}
+            paint.setStrokeWidth(8);paint.setColor(Color.argb(60,150,180,190));canvas.drawCircle(cx,cy,radius,paint);
+            float sweep=360f*Math.max(.02f,percent/100f)*entrance;
+            paint.setStrokeWidth(9);paint.setColor(Color.rgb(31,236,183));
+            canvas.drawArc(cx-radius,cy-radius,cx+radius,cy+radius,-90,sweep,false,paint);
+            double dotAngle=Math.toRadians(-90+sweep);paint.setStyle(Paint.Style.FILL);
+            paint.setColor(Color.WHITE);canvas.drawCircle(cx+(float)Math.cos(dotAngle)*radius,cy+(float)Math.sin(dotAngle)*radius,5+pulse*2,paint);
+            centered(canvas,percent+"%",cx,cy+18,44,Color.WHITE,true);
+            centered(canvas,source,cx,cy+122,16,Color.rgb(127,241,211),true);
+            if(charging&&!Float.isNaN(currentAmps)&&!Float.isNaN(voltage)&&voltage>0){
+                centered(canvas,String.format(Locale.JAPAN,"推定 %.1f W",currentAmps*voltage),cx,cy+168,28,Color.WHITE,true);
+                centered(canvas,String.format(Locale.JAPAN,"%.2f A   •   %.2f V",currentAmps,voltage),cx,cy+199,17,Color.rgb(205,222,230),false);
+            }else{
+                centered(canvas,"電力を計測中…",cx,cy+168,24,Color.WHITE,true);
+                if(!Float.isNaN(voltage)&&voltage>0)centered(canvas,String.format(Locale.JAPAN,"-- A   •   %.2f V",voltage),cx,cy+199,17,Color.rgb(205,222,230),false);
+            }
+            centered(canvas,"電池側の瞬間電流から計算した推定値",cx,cy+240,12,Color.rgb(127,153,165),false);
+            centered(canvas,"タップで閉じる",cx,h-42,12,Color.rgb(105,132,144),false);
+            paint.setStrokeCap(Paint.Cap.BUTT);canvas.restore();
+            if(getVisibility()==VISIBLE)postInvalidateOnAnimation();
+        }
+        void centered(Canvas canvas,String text,float x,float y,float size,int color,boolean isBold){
+            paint.setStyle(Paint.Style.FILL);paint.setTextAlign(Paint.Align.CENTER);paint.setTextSize(size);paint.setTypeface(isBold?bold:normal);paint.setColor(color);
+            canvas.drawText(text,x,y,paint);paint.setTextAlign(Paint.Align.LEFT);
         }
     }
 
