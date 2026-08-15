@@ -219,8 +219,8 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
                 String endpoint = String.format(Locale.US,
                         "https://api.open-meteo.com/v1/forecast?latitude=%.5f&longitude=%.5f"
                         + "&current=temperature_2m,apparent_temperature,weather_code,is_day"
-                        + "&hourly=temperature_2m,apparent_temperature,weather_code,precipitation_probability"
-                        + "&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max"
+                        + "&hourly=temperature_2m,apparent_temperature,weather_code,precipitation_probability,precipitation"
+                        + "&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,precipitation_sum"
                         + "&timezone=auto&forecast_days=4", lat, lon);
                 connection = (HttpURLConnection)new URL(endpoint).openConnection();
                 connection.setConnectTimeout(8000);
@@ -244,6 +244,8 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
                 JSONArray hourlyTemps = hourly.getJSONArray("temperature_2m");
                 JSONArray hourlyCodes = hourly.getJSONArray("weather_code");
                 JSONArray hourlyRain = hourly.getJSONArray("precipitation_probability");
+                JSONArray hourlyPrecipitation = hourly.getJSONArray("precipitation");
+                JSONArray dailyPrecipitation = daily.getJSONArray("precipitation_sum");
                 JSONArray dailyTimes = daily.getJSONArray("time");
                 String currentTime = current.getString("time");
                 int start = 0;
@@ -251,7 +253,7 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
                         && times.getString(start).compareTo(currentTime) < 0) start++;
                 int forecastCount=Math.min(72,times.length()-start);
                 String[] nextTimes = new String[forecastCount];
-                float[] nextTemps = new float[forecastCount];
+                float[] nextTemps = new float[forecastCount], nextPrecipitation = new float[forecastCount];
                 int[] nextCodes = new int[forecastCount], nextRain = new int[forecastCount];
                 for (int i=0;i<forecastCount;i++) {
                     int index=Math.min(start+i,times.length()-1);
@@ -259,13 +261,15 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
                     nextTemps[i]=(float)hourlyTemps.getDouble(index);
                     nextCodes[i]=hourlyCodes.getInt(index);
                     nextRain[i]=hourlyRain.getInt(index);
+                    nextPrecipitation[i]=(float)hourlyPrecipitation.optDouble(index,0);
                 }
                 int dayCount=Math.min(4,dailyTimes.length());
-                String[] nextDays=new String[dayCount];float[] dayMax=new float[dayCount],dayMin=new float[dayCount];
+                String[] nextDays=new String[dayCount];float[] dayMax=new float[dayCount],dayMin=new float[dayCount],dayPrecipitation=new float[dayCount];
                 int[] dayCodes=new int[dayCount],dayRain=new int[dayCount];
                 for(int i=0;i<dayCount;i++){
                     nextDays[i]=dailyTimes.getString(i);dayMax[i]=(float)max.getDouble(i);dayMin[i]=(float)min.getDouble(i);
                     dayCodes[i]=codes.getInt(i);dayRain[i]=rain.getInt(i);
+                    dayPrecipitation[i]=(float)dailyPrecipitation.optDouble(i,0);
                 }
                 String result = String.format(Locale.JAPAN,
                         "現在 %.1f℃  %s\n今日 %.0f〜%.0f℃  降水%d%%\n明日 %.0f〜%.0f℃  %s  降水%d%%",
@@ -279,7 +283,8 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
                             (float)current.optDouble("apparent_temperature",Float.NaN),
                             current.optInt("weather_code",0),current.optInt("is_day",1)==1,
                             (float)max.optDouble(0,Float.NaN),(float)min.optDouble(0,Float.NaN),
-                            nextTimes,nextTemps,nextCodes,nextRain,nextDays,dayMax,dayMin,dayCodes,dayRain);
+                            nextTimes,nextTemps,nextCodes,nextRain,nextPrecipitation,
+                            nextDays,dayMax,dayMin,dayCodes,dayRain,dayPrecipitation);
                     getSharedPreferences("weather_cache",MODE_PRIVATE).edit()
                             .putString("response",response).putLong("updated",System.currentTimeMillis())
                             .putString("place",dashboard.placeName).putString("weather_news_url",weatherNewsUrl)
@@ -333,6 +338,7 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
             JSONArray times=hourly.getJSONArray("time"),hourlyTemps=hourly.getJSONArray("temperature_2m");
             JSONArray hourlyApparent=hourly.optJSONArray("apparent_temperature");
             JSONArray hourlyCodes=hourly.getJSONArray("weather_code"),hourlyRain=hourly.getJSONArray("precipitation_probability");
+            JSONArray hourlyPrecipitation=hourly.optJSONArray("precipitation"),dailyPrecipitation=daily.optJSONArray("precipitation_sum");
             String currentTime=current.getString("time");int start=0;
             while(start<times.length()-1&&times.getString(start).compareTo(currentTime)<0)start++;
             long updated=cache.getLong("updated",System.currentTimeMillis());
@@ -342,15 +348,19 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
             int dayIndex=0;
             while(dayIndex<dailyTimes.length()-1&&!dailyTimes.getString(dayIndex).equals(targetDate))dayIndex++;
             int tomorrowIndex=Math.min(dayIndex+1,dailyTimes.length()-1);
-            int count=Math.min(72,times.length()-start);String[] nextTimes=new String[count];float[] nextTemps=new float[count];
+            int count=Math.min(72,times.length()-start);String[] nextTimes=new String[count];
+            float[] nextTemps=new float[count],nextPrecipitation=new float[count];
             int[] nextCodes=new int[count],nextRain=new int[count];
             for(int i=0;i<count;i++){int index=start+i;nextTimes[i]=times.getString(index);
-                nextTemps[i]=(float)hourlyTemps.getDouble(index);nextCodes[i]=hourlyCodes.getInt(index);nextRain[i]=hourlyRain.getInt(index);}
+                nextTemps[i]=(float)hourlyTemps.getDouble(index);nextCodes[i]=hourlyCodes.getInt(index);nextRain[i]=hourlyRain.getInt(index);
+                nextPrecipitation[i]=hourlyPrecipitation==null?0f:(float)hourlyPrecipitation.optDouble(index,0);}
             int dayCount=Math.min(4,dailyTimes.length()-dayIndex);String[] nextDays=new String[dayCount];
-            float[] dayMax=new float[dayCount],dayMin=new float[dayCount];int[] dayCodes=new int[dayCount],dayRain=new int[dayCount];
+            float[] dayMax=new float[dayCount],dayMin=new float[dayCount],dayPrecipitation=new float[dayCount];
+            int[] dayCodes=new int[dayCount],dayRain=new int[dayCount];
             for(int i=0;i<dayCount;i++){int index=dayIndex+i;nextDays[i]=dailyTimes.getString(index);
                 dayMax[i]=(float)max.getDouble(index);dayMin[i]=(float)min.getDouble(index);
-                dayCodes[i]=codes.getInt(index);dayRain[i]=rain.getInt(index);}
+                dayCodes[i]=codes.getInt(index);dayRain[i]=rain.getInt(index);
+                dayPrecipitation[i]=dailyPrecipitation==null?0f:(float)dailyPrecipitation.optDouble(index,0);}
             String result=String.format(Locale.JAPAN,
                     "現在 %.1f℃  %s\n今日 %.0f〜%.0f℃  降水%d%%\n明日 %.0f〜%.0f℃  %s  降水%d%%",
                     hourlyTemps.getDouble(start),weatherName(hourlyCodes.getInt(start)),
@@ -362,18 +372,21 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
                     hourlyApparent==null?(float)current.optDouble("apparent_temperature",Float.NaN):
                     (float)hourlyApparent.optDouble(start,Float.NaN),hourlyCodes.optInt(start,0),
                     localHour>=6&&localHour<18,(float)max.optDouble(dayIndex,Float.NaN),(float)min.optDouble(dayIndex,Float.NaN),
-                    nextTimes,nextTemps,nextCodes,nextRain,nextDays,dayMax,dayMin,dayCodes,dayRain);
+                    nextTimes,nextTemps,nextCodes,nextRain,nextPrecipitation,
+                    nextDays,dayMax,dayMin,dayCodes,dayRain,dayPrecipitation);
         }catch(Exception ignored){}
     }
 
     private void applyWeather(String summary,float currentTemp,float apparentTemp,int currentCode,boolean isDay,
                               float todayMax,float todayMin,String[] times,float[] temps,int[] codes,int[] rain,
-                              String[] days,float[] dayMax,float[] dayMin,int[] dayCodes,int[] dayRain){
+                              float[] precipitation,String[] days,float[] dayMax,float[] dayMin,int[] dayCodes,
+                              int[] dayRain,float[] dayPrecipitation){
         dashboard.weather=summary;dashboard.currentTemp=currentTemp;dashboard.apparentTemp=apparentTemp;
         dashboard.currentCode=currentCode;dashboard.isDay=isDay;dashboard.todayMax=todayMax;dashboard.todayMin=todayMin;
         dashboard.hourTimes=times;dashboard.hourTemps=temps;dashboard.hourCodes=codes;dashboard.hourRain=rain;
+        dashboard.hourPrecipitation=precipitation;
         dashboard.dayTimes=days;dashboard.dayMax=dayMax;dashboard.dayMin=dayMin;
-        dashboard.dayCodes=dayCodes;dashboard.dayRain=dayRain;
+        dashboard.dayCodes=dayCodes;dashboard.dayRain=dayRain;dashboard.dayPrecipitation=dayPrecipitation;
         dashboard.hourScroller.forceFinished(true);dashboard.hourOffset=0;dashboard.hourPosition=0;dashboard.invalidateWeather();
     }
 
@@ -544,7 +557,8 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
         String placeName="現在地を測位中";
         float currentTemp=Float.NaN,apparentTemp=Float.NaN,todayMax=Float.NaN,todayMin=Float.NaN;
         int currentCode; boolean isDay=true;
-        String[] hourTimes,dayTimes; float[] hourTemps,dayMax,dayMin; int[] hourCodes,hourRain,dayCodes,dayRain;
+        String[] hourTimes,dayTimes; float[] hourTemps,hourPrecipitation,dayMax,dayMin,dayPrecipitation;
+        int[] hourCodes,hourRain,dayCodes,dayRain;
         final Runnable mapAction, weatherAction, fishingAction, signalAction,chargingAction; int pressedCard,hourOffset;
         float hourPosition,touchStartHourPosition;
         boolean draggingHours,pendingSensorRedraw;
@@ -593,8 +607,9 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
             box(c,pad,y,w-pad,y+82);text(c,"本体非搭載",pad+16,y+28,13,muted,false);text(c,"温度・湿度・心拍・水深",pad+16,y+58,15,white,false);c.restore();
         }
         void weatherHero(Canvas c,float w){
-            int top=skyTop(),bottom=skyBottom();
-            LinearGradient gradient=new LinearGradient(0,0,0,760,top,bottom,Shader.TileMode.CLAMP);
+            int top=skyTop();
+            LinearGradient gradient=new LinearGradient(0,0,0,760,
+                    new int[]{top,skyMiddle(),bg},new float[]{0f,.58f,1f},Shader.TileMode.CLAMP);
             p.setShader(gradient);c.drawRect(0,0,w,760,p);p.setShader(null);
             drawSkyDecoration(c,w);
             String shownPlace=placeName.length()>7?placeName.substring(0,7)+"…":placeName;
@@ -642,7 +657,7 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
                 float gy=425-(hourTemps[dataIndex]-min)/(max-min)*24;
                 if(dataIndex==first)line.moveTo(x,gy);else line.lineTo(x,gy);
                 p.setColor(white);c.drawCircle(x,gy,3,p);
-                text(c,hourRain[dataIndex]+"%",x-10,463,10,Color.rgb(142,210,255),true);
+                text(c,hourRain[dataIndex]+"%  "+formatRainMm(hourPrecipitation[dataIndex]),x-25,463,9,Color.rgb(142,210,255),true);
             }
             p.setStyle(Paint.Style.STROKE);p.setStrokeWidth(2);p.setColor(Color.argb(185,255,255,255));c.drawPath(line,p);p.setStyle(Paint.Style.FILL);
             c.restore();
@@ -655,7 +670,7 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
                 if(i>0){p.setColor(Color.argb(38,255,255,255));c.drawRect(34,y-21,w-34,y-20,p);}
                 text(c,dayLabel(dayTimes[i],i),40,y,14,white,i<2);
                 drawWeatherIcon(c,126,y-5,.25f,dayCodes[i],true);
-                text(c,dayRain[i]+"%",153,y,11,Color.rgb(142,210,255),true);
+                text(c,dayRain[i]+"%  "+formatRainMm(dayPrecipitation[i]),153,y,10,Color.rgb(142,210,255),true);
                 text(c,String.format(Locale.JAPAN,"%.0f°",dayMin[i]),w-104,y,14,Color.argb(190,255,255,255),false);
                 text(c,String.format(Locale.JAPAN,"%.0f°",dayMax[i]),w-58,y,14,white,true);
             }
@@ -675,7 +690,16 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
             if(currentCode>=51&&currentCode<=82)return Color.rgb(53,79,111);
             return Color.rgb(65,103,145);
         }
-        int skyBottom(){return isDay?Color.rgb(16,55,105):Color.rgb(7,17,45);}
+        int skyMiddle(){
+            if(!isDay)return Color.rgb(10,28,60);
+            if(currentCode==0)return Color.rgb(24,82,145);
+            if(currentCode>=51&&currentCode<=82)return Color.rgb(35,61,89);
+            return Color.rgb(31,70,112);
+        }
+        String formatRainMm(float amount){
+            if(amount<.05f)return "0mm";
+            return amount<10f?String.format(Locale.JAPAN,"%.1fmm",amount):String.format(Locale.JAPAN,"%.0fmm",amount);
+        }
         void drawSkyDecoration(Canvas c,float w){
             p.setColor(Color.argb(isDay?24:34,255,255,255));c.drawCircle(w-32,88,78,p);c.drawCircle(30,205,55,p);
             if(!isDay){for(int i=0;i<11;i++){float x=18+(i*73)%Math.max(40,(int)w),y=72+(i*47)%125;
